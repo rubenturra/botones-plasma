@@ -677,6 +677,12 @@ class Dialog(QtWidgets.QDialog):
         L.addWidget(self.retal)
         self.sim=QtWidgets.QCheckBox("Crear la simulacion del programa final y abrir el simulador al terminar"); self.sim.setChecked(True); L.addWidget(self.sim)
         self.clean=QtWidgets.QCheckBox("Borrar el mecanizado anterior hecho con este boton"); self.clean.setChecked(True); L.addWidget(self.clean)
+        others=nesting_documents()
+        self.all_docs=QtWidgets.QCheckBox("Mecanizar todos los anidados abiertos (%d): %s"%(len(others),", ".join(d.Label for d in others)))
+        self.all_docs.setEnabled(len(others)>1); self.all_docs.setChecked(False)
+        self.all_docs.setToolTip("Hace el mecanizado de cada documento de anidado abierto con estas mismas opciones; "
+                                 "cada uno guarda sus programas con su nombre (por ejemplo ..._Nesting_Result_10mm_QtPlasmaC.ngc)")
+        L.addWidget(self.all_docs)
         F2=QtWidgets.QFormLayout(); L.addLayout(F2)
         last=App.ParamGet(PREFS).GetString("LastFolder","")
         h=QtWidgets.QHBoxLayout(); self.folder=QtWidgets.QLineEdit(last if last and os.path.isdir(last) else (os.path.dirname(doc.FileName) if doc.FileName else os.path.expanduser("~")))
@@ -794,6 +800,25 @@ def mecanizar(doc,groups,kerf,tool_label,post,adapt_qt,opt,outdir,base,save_reta
         results.append(res)
     return results
 
+def nesting_documents():
+    """Open documents with a nesting result (sheets and parts) to machine."""
+    out=[]
+    for d in App.listDocuments().values():
+        if d.Name.startswith("Nesting_Preview"): continue
+        try:
+            if detect(d,False)[0]: out.append(d)
+        except Exception: pass
+    return out
+
+def activate_doc(doc):
+    App.setActiveDocument(doc.Name)
+    try:
+        mdi=Gui.getMainWindow().findChild(QtWidgets.QMdiArea)
+        for sub in mdi.subWindowList():
+            if sub.windowTitle().split(" : ")[0]==doc.Label: mdi.setActiveSubWindow(sub); break
+    except Exception: pass
+    QtWidgets.QApplication.processEvents()
+
 def main():
     doc=App.ActiveDocument
     if not doc: QtWidgets.QMessageBox.warning(None,TITLE,"Abre primero el proyecto con las piezas."); return
@@ -812,16 +837,30 @@ def main():
     prog=QtWidgets.QProgressDialog("Preparando...","Cancelar",0,100,Gui.getMainWindow()); prog.setWindowTitle(TITLE)
     prog.setWindowModality(QtCore.Qt.WindowModal); prog.setMinimumDuration(0); prog.setMinimumWidth(480)
     t0=time.time()
-    if dlg.clean.isChecked():
-        prog.setLabelText("Borrando el mecanizado anterior..."); QtWidgets.QApplication.processEvents()
-        n=remove_previous(doc); log("Borrados %d objetos del mecanizado anterior"%n)
-    groups=dlg.groups
-    res=mecanizar(doc,groups,dlg.kerf.value(),dlg.tool.currentText(),dlg.post.currentText(),dlg.qt.isChecked() and dlg.qt.isEnabled(),opt,outdir,base,dlg.retal.isChecked() and dlg.retal.isEnabled(),prog,dlg.sim.isChecked() and dlg.qt.isChecked())
+    # One document, or every open nesting result with the same options.
+    targets=[(doc,dlg.groups)]
+    if dlg.all_docs.isChecked():
+        targets=[(d,dlg.groups if d is doc else detect(d,False)[0]) for d in nesting_documents()]
+    res=[]
+    for n_doc,(d,groups) in enumerate(targets,1):
+        if prog.wasCanceled(): break
+        activate_doc(d)
+        prog.setWindowTitle("%s - %s (%d de %d)"%(TITLE,d.Label,n_doc,len(targets)))
+        if dlg.clean.isChecked():
+            prog.setLabelText("%s: borrando el mecanizado anterior..."%d.Label); QtWidgets.QApplication.processEvents()
+            n=remove_previous(d); log("%s: borrados %d objetos del mecanizado anterior"%(d.Label,n))
+        dbase=base if len(targets)==1 else "%s_%s"%(base,clean_name(d.Label))
+        part=mecanizar(d,groups,dlg.kerf.value(),dlg.tool.currentText(),dlg.post.currentText(),dlg.qt.isChecked() and dlg.qt.isEnabled(),opt,outdir,dbase,dlg.retal.isChecked() and dlg.retal.isEnabled(),prog,dlg.sim.isChecked() and dlg.qt.isChecked())
+        for r in part:
+            if len(targets)>1: r["name"]="%s · %s"%(d.Label,r["name"])
+        res+=part
+        for o in d.Objects:
+            if o.Name.startswith(("Nesting_","Part_","JoinedParts_")) and o.TypeId=="Part::Feature": o.ViewObject.Transparency=50
+        try: Gui.getDocument(d.Name).activeView().viewTop(); Gui.getDocument(d.Name).activeView().fitAll()
+        except Exception: pass
+        if d.FileName: d.save()
     prog.setValue(100); prog.close(); restore_cursor()
-    for o in doc.Objects:
-        if o.Name.startswith(("Nesting_","Part_","JoinedParts_")) and o.TypeId=="Part::Feature": o.ViewObject.Transparency=50
-    Gui.ActiveDocument.ActiveView.viewTop(); Gui.SendMsgToActiveView("ViewFit")
-    if doc.FileName: doc.save()
+    activate_doc(doc)
     lines=[]; ok=True
     for r in res:
         if "holes" in r:
@@ -841,4 +880,4 @@ def main():
     log(msg); QtWidgets.QMessageBox.information(Gui.getMainWindow(),TITLE,msg)
     if sims:
         import BotonesPlasma_Simulacion
-        QtCore.QTimer.singleShot(300, lambda: BotonesPlasma_Simulacion.run(doc))
+        QtCore.QTimer.singleShot(300, lambda: BotonesPlasma_Simulacion.run(doc if len(targets)==1 else None))
