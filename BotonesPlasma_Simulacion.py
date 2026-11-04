@@ -107,9 +107,12 @@ class Simulation(QtWidgets.QDialog):
         self.torch_sep = coin.SoSeparator()
         self.torch_pos = coin.SoTranslation()
         mat3 = coin.SoMaterial(); mat3.diffuseColor.setValue(1.0, 0.85, 0.0); mat3.emissiveColor.setValue(1.0, 0.6, 0.0)
-        cone = coin.SoCone(); cone.bottomRadius = 12; cone.height = 40
+        # Torch size follows the sheet so it is easy to see on a whole sheet.
+        bb = self.gcode.Shape.BoundBox
+        r = max(15.0, 0.018 * max(bb.XLength, bb.YLength))
+        cone = coin.SoCone(); cone.bottomRadius = r; cone.height = 3.0 * r
         rot = coin.SoRotationXYZ(); rot.axis = coin.SoRotationXYZ.X; rot.angle = -math.pi / 2
-        lift = coin.SoTranslation(); lift.translation.setValue(0, 0, 20)
+        lift = coin.SoTranslation(); lift.translation.setValue(0, 0, 1.5 * r)
         for n in (self.torch_pos, mat3, lift, rot, cone):
             self.torch_sep.addChild(n)
         for n in (self.cut_sep, self.rap_sep, self.torch_sep):
@@ -256,19 +259,33 @@ _open = []
 
 
 def run(doc=None):
-    doc = doc or App.ActiveDocument
-    if doc is None:
-        QtWidgets.QMessageBox.information(Gui.getMainWindow(), TITLE, "No hay ningún documento abierto."); return
-    progs = program_objects(doc)
+    """Simulate a program; doc given (after Mecanizar plasma) picks that document,
+    otherwise every machined sheet of every open document can be chosen."""
+    docs = [doc] if doc is not None else list(App.listDocuments().values())
+    progs = [(d, g) for d in docs for g, p in program_objects(d)]
     if not progs:
         QtWidgets.QMessageBox.information(Gui.getMainWindow(), TITLE,
-            "Este documento no tiene programa de plasma. Pulsa antes «Mecanizar plasma»."); return
-    gcode = progs[0][0]
+            "No hay ningún programa de plasma en los documentos abiertos. Pulsa antes «Mecanizar plasma»."); return
+    doc, gcode = progs[0]
     if len(progs) > 1:
-        names = [g.Label for g, p in progs]
-        name, ok = QtWidgets.QInputDialog.getItem(Gui.getMainWindow(), TITLE, "Chapa a simular:", names, 0, False)
+        active = App.ActiveDocument
+        names = ["%s  ·  %s" % (d.Label, g.Label) for d, g in progs]
+        start = next((k for k, (d, g) in enumerate(progs) if active is not None and d.Name == active.Name), 0)
+        name, ok = QtWidgets.QInputDialog.getItem(Gui.getMainWindow(), TITLE,
+                                                  "Anidado y chapa a simular:", names, start, False)
         if not ok: return
-        gcode = progs[names.index(name)][0]
+        doc, gcode = progs[names.index(name)]
+    # Bring the 3D view of that document to the front.
+    App.setActiveDocument(doc.Name)
+    try:
+        mdi = Gui.getMainWindow().findChild(QtWidgets.QMdiArea)
+        view = Gui.getDocument(doc.Name).activeView()
+        for sub in mdi.subWindowList():
+            if sub.windowTitle().split(" : ")[0] == doc.Label:
+                mdi.setActiveSubWindow(sub)
+                break
+    except Exception:
+        pass
     for old in list(_open):
         try: old.close()
         except Exception: pass
