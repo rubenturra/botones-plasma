@@ -149,11 +149,45 @@ def edge(cmd):
     g,s,e,i,j=cmd
     return Part.LineSegment(App.Vector(s[0],s[1],0),App.Vector(e[0],e[1],0)).toShape() if g==1 else arc_edge(s,e,(s[0]+i,s[1]+j),g==2)
 
+def outline(c):
+    """Polygon of a contour (arcs sampled every ~10 degrees)."""
+    pts=[]
+    for g,s,e,i,j in c:
+        pts.append(tuple(s))
+        if g in (2,3):
+            cx,cy=s[0]+i,s[1]+j; r=math.hypot(i,j)
+            a0=math.atan2(s[1]-cy,s[0]-cx); a1=math.atan2(e[1]-cy,e[0]-cx)
+            if g==2 and a1>=a0: a1-=2*math.pi
+            if g==3 and a1<=a0: a1+=2*math.pi
+            n=max(1,int(abs(a1-a0)/math.radians(10)))
+            pts+=[(cx+r*math.cos(a0+(a1-a0)*t/n),cy+r*math.sin(a0+(a1-a0)*t/n)) for t in range(1,n)]
+    return pts
+def inside_poly(pt,poly):
+    x,y=pt; res=False
+    for (x1,y1),(x2,y2) in zip(poly,poly[1:]+poly[:1]):
+        if (y1>y)!=(y2>y) and x<(x2-x1)*(y-y1)/(y2-y1)+x1: res=not res
+    return res
+def nesting_depth(conts,bbs):
+    """How many contours really surround each one. Even = part outline, odd = hole;
+    a part nested inside another part's hole has depth 2."""
+    polys=[outline(c) for c in conts]; depth=[]
+    for k in range(len(conts)):
+        pt=polys[k][0]; n=0
+        for j in range(len(conts)):
+            if j!=k and bbs[j][0]<=bbs[k][0] and bbs[j][1]<=bbs[k][1] and bbs[j][2]>=bbs[k][2] and bbs[j][3]>=bbs[k][3] \
+               and (bbs[j][2]-bbs[j][0])*(bbs[j][3]-bbs[j][1])>(bbs[k][2]-bbs[k][0])*(bbs[k][3]-bbs[k][1]) and inside_poly(pt,polys[j]):
+                n+=1
+        depth.append(n)
+    return depth
+
 def adapt(raw,dst,faces,sheet,opt,title,tick):
     conts=parse(raw)
     bbs=[cbbox(c) for c in conts]
-    inner=[any(k!=j and bbs[j][0]<bbs[k][0] and bbs[j][1]<bbs[k][1] and bbs[j][2]>bbs[k][2] and bbs[j][3]>bbs[k][3] for j in range(len(conts))) for k in range(len(conts))]
-    order=[k for k in range(len(conts)) if inner[k]]+[k for k in range(len(conts)) if not inner[k]]
+    depth=nesting_depth(conts,bbs)
+    inner=[d%2==1 for d in depth]
+    # Cut every contour before any contour that surrounds it: holes of parts
+    # nested in another part's hole, those parts, that hole, outer outlines.
+    order=sorted(range(len(conts)),key=lambda k:-depth[k])
     ox,oy=sheet.XMin,sheet.YMin
     def clearance(pt):
         best=99.0; v=Part.Vertex(App.Vector(pt[0],pt[1],0))
