@@ -739,7 +739,7 @@ class Dialog(QtWidgets.QDialog):
         if d: self.folder.setText(d)
 
 # ------------------------------------------------------------------ proceso
-def mecanizar(doc,groups,kerf,tool_label,post,adapt_qt,opt,outdir,base,save_retal=False,progress=None,make_simulation=True):
+def stepper(doc,progress):
     def step(txt,val=None):
         log(txt)
         # CAM creates its objects in the ACTIVE document: keep ours active.
@@ -751,25 +751,49 @@ def mecanizar(doc,groups,kerf,tool_label,post,adapt_qt,opt,outdir,base,save_reta
             if val is not None: progress.setValue(val)
             QtWidgets.QApplication.processEvents(); return progress.wasCanceled()
         return False
+    return step
+
+def prepare_jobs(doc,groups,kerf,tool_label,post,outdir,base,progress=None):
+    """CAM jobs (without profiles) of every sheet of doc. Returns (pre, sheets)
+    for parallel_profiles_multi, or None when cancelled."""
+    step=stepper(doc,progress); total=len(groups); pre={}; sheets=[]
+    for i,(name,sb,parts) in enumerate(groups,1):
+        tag=("_chapa%d"%i) if total>1 else ""
+        if step("%s - %s: preparando el trabajo CAM (%d piezas)..."%(doc.Label,name,len(parts))): return None
+        pre[i]=make_job(doc,i,name,sb,parts,kerf,tool_label,post,with_ops=False)
+        bb=pre[i][3].Shape.BoundBox
+        sheets.append((pre[i][6],bb.ZMin,bb.ZMax,os.path.join(outdir,"%s%s_%s.ngc"%(base,tag,post))))
+    return pre,sheets
+
+def drop_prepared(doc,pre):
+    for i,v in pre.items(): remove_job(doc,v[0],"Plasma_Piezas_%d"%i)
+
+def pool_tick(progress,nsheets,ndocs=1):
+    def ptick(done,n,secs):
+        if not progress: return False
+        progress.setLabelText("Calculando los perfiles de %d chapa(s)%s en %d nucleos a la vez (%d de %d terminados, %.0f s)..."%(
+            nsheets,(" de %d anidados"%ndocs) if ndocs>1 else "",n,done,n,secs))
+        progress.setValue(int(5+30*done/max(n,1)))
+        QtWidgets.QApplication.processEvents(); return progress.wasCanceled()
+    return ptick
+
+def mecanizar(doc,groups,kerf,tool_label,post,adapt_qt,opt,outdir,base,save_retal=False,progress=None,make_simulation=True,prepared=None):
+    """prepared=(pre,pooled): phase 1 already done by main for several documents."""
+    step=stepper(doc,progress)
     results=[]; total=len(groups)
     # Phase 1: CAM jobs of every sheet, then ONE round of background processes
     # for all their profiles (each round costs ~14 s just to start FreeCAD).
     pre={}; pooled=False
-    if post=="linuxcnc" and worker_exe():
-        sheets=[]
-        for i,(name,sb,parts) in enumerate(groups,1):
-            tag=("_chapa%d"%i) if total>1 else ""
-            if step("%s: preparando el trabajo CAM (%d piezas)..."%(name,len(parts)),int(5*(i-1)/total)): return results
-            pre[i]=make_job(doc,i,name,sb,parts,kerf,tool_label,post,with_ops=False)
-            bb=pre[i][3].Shape.BoundBox
-            sheets.append((pre[i][6],bb.ZMin,bb.ZMax,os.path.join(outdir,"%s%s_%s.ngc"%(base,tag,post))))
-        def ptick(done,n,secs):
-            return step("Calculando los perfiles de %d chapa(s) en %d nucleos a la vez (%d de %d terminados, %.0f s)..."%(total,n,done,n,secs),
-                        int(5+30*done/max(n,1)))
-        pooled=parallel_profiles_multi(sheets,kerf,ptick)
+    if prepared is not None:
+        pre,pooled=prepared
+    elif post=="linuxcnc" and worker_exe():
+        r=prepare_jobs(doc,groups,kerf,tool_label,post,outdir,base,progress)
+        if r is None: return results
+        pre,sheets=r
+        pooled=parallel_profiles_multi(sheets,kerf,pool_tick(progress,total))
         if not pooled:
             if progress and progress.wasCanceled(): return results
-            for i,v in pre.items(): remove_job(doc,v[0],"Plasma_Piezas_%d"%i)   # classic in-process profiles
+            drop_prepared(doc,pre)   # classic in-process profiles
             pre={}
     for i,(name,sb,parts) in enumerate(groups,1):
         tag=("_chapa%d"%i) if total>1 else ""
@@ -872,15 +896,39 @@ def main():
     if dlg.all_docs.isChecked():
         targets=[(d,dlg.groups if d is doc else detect(d,False)[0]) for d in nesting_documents()]
     res=[]
+    post=dlg.post.currentText(); kerf=dlg.kerf.value(); tool=dlg.tool.currentText()
+    dbases={d.Name:(base if len(targets)==1 else "%s_%s"%(base,clean_name(d.Label))) for d,g in targets}
+    def clean(d):
+        if dlg.clean.isChecked():
+            prog.setLabelText("%s: borrando el mecanizado anterior..."%d.Label); QtWidgets.QApplication.processEvents()
+            n=remove_previous(d); log("%s: borrados %d objetos del mecanizado anterior"%(d.Label,n))
+    # Several documents: prepare all of them and compute every sheet of every
+    # document in ONE round of background processes (start-up paid once).
+    prepared={}
+    if len(targets)>1 and post=="linuxcnc" and worker_exe():
+        allsheets=[]; owner=[]
+        for d,groups in targets:
+            if prog.wasCanceled(): break
+            activate_doc(d); clean(d)
+            r=prepare_jobs(d,groups,kerf,tool,post,outdir,dbases[d.Name],prog)
+            if r is None: break
+            prepared[d.Name]=r[0]; allsheets+=r[1]; owner+=[d]*len(r[1])
+        ok=(not prog.wasCanceled()) and len(prepared)==len(targets) and \
+           parallel_profiles_multi(allsheets,kerf,pool_tick(prog,len(allsheets),len(targets)))
+        if not ok:
+            for d,g in targets:
+                if d.Name in prepared: drop_prepared(d,prepared[d.Name])
+            prepared={}
+            if prog.wasCanceled(): targets=[]
+        else:
+            prepared={k:(v,True) for k,v in prepared.items()}
     for n_doc,(d,groups) in enumerate(targets,1):
         if prog.wasCanceled(): break
         activate_doc(d)
         prog.setWindowTitle("%s - %s (%d de %d)"%(TITLE,d.Label,n_doc,len(targets)))
-        if dlg.clean.isChecked():
-            prog.setLabelText("%s: borrando el mecanizado anterior..."%d.Label); QtWidgets.QApplication.processEvents()
-            n=remove_previous(d); log("%s: borrados %d objetos del mecanizado anterior"%(d.Label,n))
-        dbase=base if len(targets)==1 else "%s_%s"%(base,clean_name(d.Label))
-        part=mecanizar(d,groups,dlg.kerf.value(),dlg.tool.currentText(),dlg.post.currentText(),dlg.qt.isChecked() and dlg.qt.isEnabled(),opt,outdir,dbase,dlg.retal.isChecked() and dlg.retal.isEnabled(),prog,dlg.sim.isChecked() and dlg.qt.isChecked())
+        if d.Name not in prepared: clean(d)
+        dbase=dbases[d.Name]
+        part=mecanizar(d,groups,dlg.kerf.value(),dlg.tool.currentText(),dlg.post.currentText(),dlg.qt.isChecked() and dlg.qt.isEnabled(),opt,outdir,dbase,dlg.retal.isChecked() and dlg.retal.isEnabled(),prog,dlg.sim.isChecked() and dlg.qt.isChecked(),prepared.get(d.Name))
         for r in part:
             if len(targets)>1: r["name"]="%s · %s"%(d.Label,r["name"])
         res+=part
