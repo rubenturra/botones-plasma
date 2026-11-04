@@ -29,6 +29,28 @@ def density(material):
 
 
 # ---------------------------------------------------------------- en FreeCAD
+_names_cache = {}
+
+
+def source_names(doc):
+    """{source part index: original part name} from the nesting result data."""
+    meta = doc.getObject("NestingResultData")
+    if meta is None or "ResultJson" not in meta.PropertiesList:
+        return {}
+    key = (doc.Name, len(meta.ResultJson))
+    if key not in _names_cache:
+        out = {}
+        try:
+            for s in json.loads(meta.ResultJson).get("sourceParts", []):
+                if s.get("label") and s.get("source_part_index") is not None:
+                    out[int(s["source_part_index"])] = str(s["label"])
+        except Exception:
+            pass
+        _names_cache.clear()
+        _names_cache[key] = out
+    return _names_cache[key]
+
+
 def collect(job_dir, res, settings):
     """Save what the report needs (runs in FreeCAD, takes well under a second).
     Returns the job file or None."""
@@ -50,6 +72,7 @@ def collect(job_dir, res, settings):
     zmax = max(p.Shape.BoundBox.ZMax for p in parts)
     if not thickness:
         thickness = zmax - zmin
+    names = source_names(doc)
     groups = {}
     for p in parts:
         # Same source part = same type (FreeCAD renumbers the labels of copies:
@@ -58,7 +81,8 @@ def collect(job_dir, res, settings):
             key = "src_%s" % p.SourcePartIndex
         else:
             key = re.sub(r"\d{3}$", "", p.Label) or p.Label
-        label = groups[key]["label"] if key in groups else p.Label
+        label = groups[key]["label"] if key in groups else names.get(
+            getattr(p, "SourcePartIndex", None), p.Label)
         face = None
         for f in p.Shape.Faces:
             b = f.BoundBox
