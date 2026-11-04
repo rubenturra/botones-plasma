@@ -190,15 +190,29 @@ def adapt(raw,dst,faces,sheet,opt,title,tick):
     # nested in another part's hole, those parts, that hole, outer outlines.
     order=sorted(range(len(conts)),key=lambda k:-depth[k])
     ox,oy=sheet.XMin,sheet.YMin
+    # Spatial grid of part faces: each pierce test only looks at the parts
+    # around it instead of every part on the sheet.
+    CELL=100.0; grid={}; boxes=[f.BoundBox for f in faces]
+    for idx,b in enumerate(boxes):
+        for gx in range(int((b.XMin-12)//CELL),int((b.XMax+12)//CELL)+1):
+            for gy in range(int((b.YMin-12)//CELL),int((b.YMax+12)//CELL)+1):
+                grid.setdefault((gx,gy),[]).append(idx)
+    cache={}
     def clearance(pt):
-        best=99.0; v=Part.Vertex(App.Vector(pt[0],pt[1],0))
-        for f in faces:
-            b=f.BoundBox
+        key=(round(pt[0],3),round(pt[1],3))
+        if key in cache: return cache[key]
+        if min(pt[0]-sheet.XMin,pt[1]-sheet.YMin,sheet.XMax-pt[0],sheet.YMax-pt[1])<2:
+            cache[key]=-1; return -1
+        best=99.0; v=None; P3=App.Vector(pt[0],pt[1],0)
+        for idx in grid.get((int(pt[0]//CELL),int(pt[1]//CELL)),()):
+            b=boxes[idx]
             if b.XMin-12<pt[0]<b.XMax+12 and b.YMin-12<pt[1]<b.YMax+12:
-                if f.isInside(App.Vector(pt[0],pt[1],0),0.01,True): return -1
+                f=faces[idx]
+                if b.XMin<=pt[0]<=b.XMax and b.YMin<=pt[1]<=b.YMax and f.isInside(P3,0.01,True):
+                    cache[key]=-1; return -1
+                if v is None: v=Part.Vertex(P3)
                 best=min(best,f.distToShape(v)[0])
-        if min(pt[0]-sheet.XMin,pt[1]-sheet.YMin,sheet.XMax-pt[0],sheet.YMax-pt[1])<2: return -1
-        return best
+        cache[key]=best; return best
     E,I=opt["ext"],opt["int"]
     out=["(%s - %d agujeros + %d contornos - origen en la esquina de la chapa)"%(title,sum(inner),len(conts)-sum(inner)),
          "(FreeCAD CAM + postprocesador linuxcnc, adaptado a QtPlasmaC con Botones plasma / Mecanizar plasma)",
@@ -272,7 +286,7 @@ def adapt(raw,dst,faces,sheet,opt,title,tick):
             cap_in=min(cap_in, rp if (o["in"]=="Recta" and circle) else 0.45*rp if circle else 0.4*span)
             cap_out=min(cap_out, 0.45*rp if circle else 0.4*span)
         sizes=[cap_in*f for f in ((1.0,0.85,0.7,0.6,0.55,0.5) if not inner[k] else (1.0,))]
-        best=None
+        best=None; top=(cap_in+0.75,sizes[0])
         for q,seq,d,nv in cands:
             nperp=scrap_n(d)
             for sz in sizes:
@@ -281,6 +295,8 @@ def adapt(raw,dst,faces,sheet,opt,title,tick):
                 c=99 if inner[k] else clearance(p)
                 score=(min(c,cap_in+0.75),sz)
                 if best is None or score>best[0]: best=(score,q,seq,d,(nv if nv is not None else nperp),p,lin,c,sz)
+                if score[0]>=cap_in+0.75: break     # smaller sizes cannot score better here
+            if best[0]>=top: break                  # best possible entry already found
         score,q,seq,d,nvec,p,lin,c,sz=best
         # salida: tangente al final del contorno (llega a q)
         d_end=tangent(seq[-1]) if seq[-1][0]==1 else None
@@ -388,6 +404,44 @@ def remove_previous(doc):
         try: doc.removeObject(n)
         except Exception: pass
     doc.recompute(); return len(victims)
+
+def undo(doc=None):
+    """Deshacer Mecanizar plasma: quita trabajos CAM, G-code, perforaciones y
+    simulacion del documento y, si se quiere, borra los programas y retales creados."""
+    doc=doc or App.ActiveDocument
+    if not doc:
+        QtWidgets.QMessageBox.information(Gui.getMainWindow(),"Deshacer mecanizado plasma","No hay ningun documento abierto."); return
+    objs=[o for o in doc.Objects if o.Name.startswith(("Plasma_","Job_Plasma_SIM"))]
+    if not objs:
+        QtWidgets.QMessageBox.information(Gui.getMainWindow(),"Deshacer mecanizado plasma","Este documento no tiene mecanizado de plasma."); return
+    files=sorted({f for o in objs for f in getattr(o,"PlasmaFiles",[]) if os.path.isfile(f)})
+    box=QtWidgets.QMessageBox(Gui.getMainWindow()); box.setWindowTitle("Deshacer mecanizado plasma"); box.setIcon(QtWidgets.QMessageBox.Question)
+    box.setText("Se quitara del documento %s el mecanizado de plasma: trabajos CAM, G-code, perforaciones y simulacion.\n\nLas piezas y las chapas no se tocan."%doc.Label)
+    chk=None
+    if files:
+        chk=QtWidgets.QCheckBox("Borrar tambien los %d archivos creados (programas .ngc y retal)"%len(files)); box.setCheckBox(chk)
+        box.setDetailedText("\n".join(files))
+    yes=box.addButton("Deshacer",QtWidgets.QMessageBox.AcceptRole); box.addButton("Cancelar",QtWidgets.QMessageBox.RejectRole)
+    box.exec_()
+    if box.clickedButton() is not yes: return
+    try:
+        if Gui.Control.activeDialog(): Gui.Control.closeDialog()
+    except Exception: pass
+    doc.openTransaction("Deshacer mecanizado plasma")
+    n=remove_previous(doc)
+    for o in doc.Objects:
+        if o.Name.startswith(("Nesting_","Part_","JoinedParts_")) and o.TypeId=="Part::Feature":
+            try: o.ViewObject.Transparency=0
+            except Exception: pass
+    doc.commitTransaction()
+    deleted=0
+    if chk is not None and chk.isChecked():
+        for f in files:
+            try: os.remove(f); deleted+=1
+            except OSError: pass
+    log("Deshecho: %d objetos quitados, %d archivos borrados"%(n,deleted))
+    QtWidgets.QMessageBox.information(Gui.getMainWindow(),"Deshacer mecanizado plasma",
+        "Hecho: quitados %d objetos del mecanizado%s."%(n,(", borrados %d archivos"%deleted) if deleted else ""))
 
 def make_sim(doc,i,name,comp,sb,kerf,text,zmin,zmax):
     import Path.Main.Job as PathJob, Path.Main.Stock as PathStock, Path.Op.Custom as PathCustom
@@ -561,6 +615,11 @@ def mecanizar(doc,groups,kerf,tool_label,post,adapt_qt,opt,outdir,base,save_reta
         if step("%s: perfil calculado (%d caras). Postprocesando con %s..."%(name,ntop,post)): return results
         raw=os.path.join(outdir,"%s%s_%s.ngc"%(base,tag,post))
         run_post(post,[tc]+ops,raw)
+        # The profiles are computed; adding drawings later must not make
+        # FreeCAD recompute them again (that doubled the time).
+        for o in [job]+list(job.OutListRecursive): 
+            try: o.purgeTouched()
+            except Exception: pass
         res=dict(name=name,raw=raw,parts=len(parts),final=raw)
         res["expected_holes"]=sum(len([f for f in p.Shape.Faces if f.normalAt(0,0).z>0.99][0].Wires)-1 for p in parts)
         if adapt_qt:
@@ -581,7 +640,8 @@ def mecanizar(doc,groups,kerf,tool_label,post,adapt_qt,opt,outdir,base,save_reta
             txt=r["text"]
             res.update(final=dst,holes=r["holes"],outer=r["outer"],worst=r["worst"],short=r["short"],
                        m3=txt.count("M3 $0 S1"),m5=txt.count("M5 $0"),z=len(re.findall(r"\bZ-?\d",txt)))
-            doc.recompute(); QtWidgets.QApplication.processEvents()
+            for o in (g,pp): o.recompute()
+            QtWidgets.QApplication.processEvents()
             if make_simulation:
                 step("%s: creando la simulacion del programa final..."%name)
                 comp=model.Objects[0] if hasattr(model,"Objects") and model.Objects else doc.getObject("Plasma_Piezas_%d"%i)
@@ -591,6 +651,12 @@ def mecanizar(doc,groups,kerf,tool_label,post,adapt_qt,opt,outdir,base,save_reta
         if save_retal:
             step("%s: guardando el retal para 1st Nesting..."%name)
             fn,info=export_offcut(doc,sb,name,th,base); res["retal"]=fn; res["retal_info"]=info
+        files=[f for f in (res.get("raw"),res.get("final"),res.get("retal")) if f]
+        try:
+            if "PlasmaFiles" not in job.PropertiesList:
+                job.addProperty("App::PropertyStringList","PlasmaFiles","Plasma","Archivos creados por Mecanizar plasma")
+            job.PlasmaFiles=sorted(set(files))
+        except Exception: pass
         results.append(res)
     return results
 

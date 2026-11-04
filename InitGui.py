@@ -24,8 +24,26 @@ class _MecanizarPlasma:
 
 Gui.addCommand("BotonesPlasma_Mecanizar", _MecanizarPlasma())
 
+
+class _DeshacerPlasma:
+    def GetResources(self):
+        return {"Pixmap": os.path.join(_DIR, "icons", "deshacer_plasma.svg"),
+                "MenuText": "Deshacer mecanizado plasma",
+                "ToolTip": "Quitar del documento lo que hizo Mecanizar plasma (trabajos CAM, G-code, "
+                           "perforaciones y simulación) y, si quieres, borrar los programas creados"}
+
+    def Activated(self):
+        import BotonesPlasma_Mecanizar
+        BotonesPlasma_Mecanizar.undo()
+
+    def IsActive(self):
+        return App.ActiveDocument is not None
+
+
+Gui.addCommand("BotonesPlasma_Deshacer", _DeshacerPlasma())
+
 try:
     from BotonesToolbar_Plasma import ensure_toolbar
-    ensure_toolbar("CAMWorkbench", "Custom_BotonesPlasma", "Plasma", ["BotonesPlasma_Mecanizar"])
+    ensure_toolbar("CAMWorkbench", "Custom_BotonesPlasma", "Plasma", ["BotonesPlasma_Mecanizar", "BotonesPlasma_Deshacer"])
 except Exception as _e:
     App.Console.PrintWarning("Botones plasma: no se pudo crear la barra (%s)\n" % _e)
