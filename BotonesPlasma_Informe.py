@@ -333,9 +333,22 @@ def build(data, png_preview=None):
         line("Retal: %s (%s)" % (os.path.basename(data["retal"]), data.get("retal_info", "")), 8, False, 0, (90, 90, 90))
     y += 3 * dpm
 
-    # ---- drawing of the sheet
+    # ---- one page: the parts table goes under the drawing, so the drawing
+    # gets the height the table leaves free (at least 60 mm).
+    n_rows = max(1, len(types))
+    row_pt = 8.5
+    def rh_of(pt):
+        f = QtGui.QFont("Arial")
+        f.setPointSizeF(pt)
+        return QtGui.QFontMetricsF(f, pdf.dev).height()
+    def table_height(pt):
+        return (rh_of(pt) * 1.4 + n_rows * rh_of(pt) * 1.35 + 1 * dpm + rh_of(9) * 2
+                + 3 * rh_of(7.5) * 1.15 + 6 * dpm)
+    min_draw = 60 * dpm
+    while row_pt > 5.5 and H - y - table_height(row_pt) - 8 * dpm < min_draw:
+        row_pt -= 0.5
     legend_h = 6 * dpm
-    avail_h = H - y - legend_h - 2 * dpm
+    avail_h = max(min_draw, H - y - table_height(row_pt) - legend_h - 2 * dpm)
     scale = min(W / sw, avail_h / sh) if sw > 0 and sh > 0 else 1
     dw, dh = sw * scale, sh * scale
     ox = (W - dw) / 2
@@ -384,12 +397,8 @@ def build(data, png_preview=None):
     line("Dibujo a escala 1:%s · rojo: perforaciones · verde rayado: retal reutilizable" % _fmt(1 / (scale / dpm)),
          7.5, False, 0, (90, 90, 90))
 
-    # ---- page 2: parts
-    pdf.newPage()
-    y = 0.0
-    line("Piezas de la chapa", 15, True, colour=(20, 40, 80))
-    line("%s  ·  %s  ·  %s mm  ·  %s" % (data["document"], data["sheet"], _fmt(thick, 1), material), 10, colour=(80, 80, 80))
-    y += 3 * dpm
+    # ---- parts table (same page)
+    y += 2 * dpm
     cols = [("", 7), ("Pieza", 58), ("Cant.", 15), ("Medidas (mm)", 32), ("Agujeros", 18),
             ("Área (cm²)", 22), ("Peso ud. (kg)", 22), ("Peso total (kg)", 24)]
     scale_c = W / (sum(c[1] for c in cols) * dpm)
@@ -400,7 +409,7 @@ def build(data, png_preview=None):
         acc += c[1] * dpm * scale_c
     p.setPen(QtCore.Qt.NoPen)
     p.setBrush(QtGui.QColor(20, 40, 80))
-    fm = font(8.5, True)
+    fm = font(row_pt, True)
     p.drawRect(QtCore.QRectF(0, y, W, fm.height() * 1.4))
     for (title, w), x in zip(cols, xs):
         p.setPen(QtGui.QColor(255, 255, 255))
@@ -408,11 +417,8 @@ def build(data, png_preview=None):
     y += fm.height() * 1.4
     total_w = 0.0
     for k, t in enumerate(types):
-        fm = font(8.5)
+        fm = font(row_pt)
         rh = fm.height() * 1.35
-        if y + rh > H - 20 * dpm:
-            pdf.newPage()
-            y = 0.0
         if k % 2:
             p.setPen(QtCore.Qt.NoPen)
             p.setBrush(QtGui.QColor(242, 244, 247))
