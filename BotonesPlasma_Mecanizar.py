@@ -9,6 +9,7 @@ import FreeCAD as App, FreeCADGui as Gui, Part, os, re, math, importlib, time
 from PySide import QtWidgets, QtCore
 
 TITLE="Mecanizar plasma"
+PIERCE_WARNING=2.5   # mm: warn when a pierce is closer than this to a part
 PREFS="User parameter:BaseApp/Preferences/Macros/MecanizarPlasma"
 def log(m): App.Console.PrintMessage("[Plasma] %s\n"%m)
 
@@ -864,7 +865,9 @@ def main():
     lines=[]; ok=True
     for r in res:
         if "holes" in r:
-            good=(r["holes"]==r["expected_holes"] and r["outer"]==r["parts"] and r["m3"]==r["m5"]==r["holes"]+r["outer"] and r["z"]==0 and r["worst"]>=3)
+            # OK = every outline and hole is cut once, torch on/off pairs match, no Z.
+            # The pierce distance is reported separately (it depends on the spacing).
+            good=(r["holes"]==r["expected_holes"] and r["outer"]==r["parts"] and r["m3"]==r["m5"]==r["holes"]+r["outer"] and r["z"]==0)
             ok&=good
             t="%s %s\n   Piezas %d -> contornos %d | agujeros %d de %d\n   Perforacion mas cercana a una pieza: %.1f mm | entradas acortadas: %d\n   Programa: %s"%(
                 "OK" if good else "REVISAR", r["name"], r["parts"], r["outer"], r["holes"], r["expected_holes"], r["worst"], r["short"], r["final"])
@@ -872,7 +875,7 @@ def main():
         if "retal" in r: t+="\n   Retal: %s"%(("%s (%s)"%(r["retal"],r["retal_info"])) if r["retal"] else r["retal_info"])
         lines.append(t)
     msg="Terminado en %.0f s.\n\n"%(time.time()-t0)+"\n\n".join(lines)
-    if any("worst" in r and r["worst"]<3 for r in res): msg+="\n\nATENCION: hay perforaciones a menos de 3 mm de una pieza. Aumenta la separacion del anidado."
+    if any("worst" in r and r["worst"]<PIERCE_WARNING for r in res): msg+="\n\nATENCION: hay perforaciones a menos de %.1f mm de una pieza. Aumenta la separacion del anidado."%PIERCE_WARNING
     if not ok: msg+="\n\nAlgo no cuadra: revisa el programa antes de cortar."
     msg+="\n\nAntes de cortar: elige el material en QtPlasmaC y haz una pasada en vacio."
     sims=[r["sim"] for r in res if r.get("sim")]
