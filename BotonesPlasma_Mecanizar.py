@@ -321,13 +321,44 @@ def make_job(doc,i,name,sb,parts,kerf,tool_label,post):
     tc.HorizFeed="2000 mm/min"; tc.VertFeed="2000 mm/min"; tc.HorizRapid="10000 mm/min"; tc.VertRapid="5000 mm/min"; tc.SpindleSpeed=1
     model=job.Model.Group[0]
     top=["Face%d"%(k+1) for k,f in enumerate(model.Shape.Faces) if f.normalAt(0,0).z>0.99 and abs(f.CenterOfMass.z-zmax)<0.01]
-    op=PathProfile.Create("Plasma_Perfil_%d"%i, parentJob=job); op.Label="Corte plasma %s"%name
-    op.Base=[(model,top)]; op.Side="Outside"; op.Direction="CW"; op.UseComp=True
-    op.processPerimeter=True; op.processHoles=True; op.processCircles=True; op.ToolController=tc
-    for p in ("StartDepth","FinalDepth","StepDown"): op.setExpression(p,None)
-    op.StartDepth=zmax; op.FinalDepth=zmin; op.StepDown=th
+    # CAM Profile ignores the outline of a face lying inside another face's
+    # hole (part-in-part nesting), so every nesting level gets its own profile.
+    levels=nesting_levels(model.Shape.Faces,top)
+    ops=[]
+    for lv in sorted(set(levels.values())):
+        names=[n for n in top if levels[n]==lv]
+        op=PathProfile.Create("Plasma_Perfil_%d_%d"%(i,lv), parentJob=job)
+        op.Label="Corte plasma %s"%name+("" if lv==0 else " (piezas dentro de agujeros, nivel %d)"%lv)
+        op.Base=[(model,names)]; op.Side="Outside"; op.Direction="CW"; op.UseComp=True
+        op.processPerimeter=True; op.processHoles=True; op.processCircles=True; op.ToolController=tc
+        for p in ("StartDepth","FinalDepth","StepDown"): op.setExpression(p,None)
+        op.StartDepth=zmax; op.FinalDepth=zmin; op.StepDown=th
+        ops.append(op)
     doc.recompute()
-    return job,tc,op,model,len(top),th
+    return job,tc,ops,model,len(top),th
+
+def nesting_levels(faces,names):
+    """Level of each top face: how many other faces' holes contain it."""
+    f={n:faces[int(n[4:])-1] for n in names}
+    holes=[]
+    for n,face in f.items():
+        for w in face.Wires:
+            if not w.isSame(face.OuterWire):
+                try: holes.append((n,Part.Face(w)))
+                except Exception: pass
+    level={}
+    for n,face in f.items():
+        c=face.OuterWire.BoundBox.Center; pt=App.Vector(c.x,c.y,face.CenterOfMass.z)
+        probe=face.Vertexes[0].Point if not face.isInside(pt,0.01,True) else pt
+        lv=0
+        for owner,hf in holes:
+            if owner==n: continue
+            hb=hf.BoundBox; fb=face.BoundBox
+            if hb.XMin<=fb.XMin and hb.YMin<=fb.YMin and hb.XMax>=fb.XMax and hb.YMax>=fb.YMax and \
+               hf.isInside(App.Vector(probe.x,probe.y,hf.CenterOfMass.z),0.01,True):
+                lv+=1
+        level[n]=lv
+    return level
 
 def run_post(post,objs,path):
     mod=importlib.import_module("Path.Post.scripts.%s_post"%post)
@@ -514,11 +545,11 @@ def mecanizar(doc,groups,kerf,tool_label,post,adapt_qt,opt,outdir,base,save_reta
     for i,(name,sb,parts) in enumerate(groups,1):
         tag=("_chapa%d"%i) if total>1 else ""
         if step("%s: creando trabajo CAM, material y herramienta (%d piezas)..."%(name,len(parts)),int(100*(i-1)/total)): return results
-        job,tc,op,model,ntop,th=make_job(doc,i,name,sb,parts,kerf,tool_label,post)
+        job,tc,ops,model,ntop,th=make_job(doc,i,name,sb,parts,kerf,tool_label,post)
         Gui.ActiveDocument.ActiveView.viewTop(); Gui.SendMsgToActiveView("ViewFit"); QtWidgets.QApplication.processEvents()
         if step("%s: perfil calculado (%d caras). Postprocesando con %s..."%(name,ntop,post)): return results
         raw=os.path.join(outdir,"%s%s_%s.ngc"%(base,tag,post))
-        run_post(post,[tc,op],raw)
+        run_post(post,[tc]+ops,raw)
         res=dict(name=name,raw=raw,parts=len(parts),final=raw)
         res["expected_holes"]=sum(len([f for f in p.Shape.Faces if f.normalAt(0,0).z>0.99][0].Wires)-1 for p in parts)
         if adapt_qt:
