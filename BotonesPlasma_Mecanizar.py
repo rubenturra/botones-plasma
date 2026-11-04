@@ -65,13 +65,9 @@ def export_offcut(doc,sb,name,thick,base):
         importDXF.export([f],fn)
     finally:
         App.closeDocument(tmp.Name)
-    note=""
-    try:
-        from Nesting1stOffcuts import extract_offcut_from_dxf
-        outer,holes,bbox,info=extract_offcut_from_dxf(fn,debug=False,deflection=0.5)
-        note="1st Nesting lo lee: %d puntos de contorno"%len(outer or [])
-    except ImportError: note="1st Nesting no esta instalado; no se ha podido comprobar"
-    except Exception as e: note="AVISO: 1st Nesting no ha podido leerlo (%s)"%e
+    # Light check (re-importing the whole DXF took ~20 s per sheet).
+    ok=os.path.isfile(fn) and os.path.getsize(fn)>0
+    note=("DXF con %d contorno(s) cerrado(s)"%len(closed)) if ok else "AVISO: no se ha podido escribir el DXF"
     return fn,"%.2f m2 - %s"%(area/1e6,note)
 
 # ------------------------------------------------------------------ geometria del G-code
@@ -332,27 +328,30 @@ try:
     try:
         import Path; Path.Log.setLevel(Path.Log.Level.NOTICE,"Path.Tool.assets.manager")
     except Exception: pass
-    doc=App.newDocument("w"); sh=Part.Shape(); sh.importBrep(cfg["brep"])
-    comp=doc.addObject("Part::Feature","Caras"); comp.Shape=sh; doc.recompute()
     import Path.Main.Job as PathJob, Path.Op.Profile as PathProfile
-    job=PathJob.Create("Job",[comp]); job.PostProcessor="linuxcnc"
-    tc=job.Tools.Group[0]; tc.Tool.Diameter=cfg["kerf"]
-    tc.HorizFeed="2000 mm/min"; tc.VertFeed="2000 mm/min"; tc.HorizRapid="10000 mm/min"; tc.VertRapid="5000 mm/min"; tc.SpindleSpeed=1
-    model=job.Model.Group[0]; ops=[]
-    for lv in sorted(set(cfg["levels"])):
-        names=["Face%%d"%%(k+1) for k,l in enumerate(cfg["levels"]) if l==lv]
-        op=PathProfile.Create("P%%d"%%lv,parentJob=job); op.Base=[(model,names)]
-        op.Side="Outside"; op.Direction="CW"; op.UseComp=True
-        op.processPerimeter=True; op.processHoles=True; op.processCircles=True; op.ToolController=tc
-        for p in ("StartDepth","FinalDepth","StepDown"): op.setExpression(p,None)
-        op.StartDepth=cfg["zmax"]; op.FinalDepth=cfg["zmin"]; op.StepDown=cfg["zmax"]-cfg["zmin"]
-        ops.append(op)
-    doc.recompute()
     m=importlib.import_module("Path.Post.scripts.linuxcnc_post")
-    m.export([tc]+ops,cfg["out"],"--no-show-editor --no-comments")
-    open(cfg["out"]+".ok","w").write("ok")
+    # One worker can hold faces of several sheets: one job per sheet.
+    for sheet in cfg["sheets"]:
+        doc=App.newDocument("w"); sh=Part.Shape(); sh.importBrep(sheet["brep"])
+        comp=doc.addObject("Part::Feature","Caras"); comp.Shape=sh; doc.recompute()
+        job=PathJob.Create("Job",[comp]); job.PostProcessor="linuxcnc"
+        tc=job.Tools.Group[0]; tc.Tool.Diameter=cfg["kerf"]
+        tc.HorizFeed="2000 mm/min"; tc.VertFeed="2000 mm/min"; tc.HorizRapid="10000 mm/min"; tc.VertRapid="5000 mm/min"; tc.SpindleSpeed=1
+        model=job.Model.Group[0]; ops=[]
+        for lv in sorted(set(sheet["levels"])):
+            names=["Face%%d"%%(k+1) for k,l in enumerate(sheet["levels"]) if l==lv]
+            op=PathProfile.Create("P%%d"%%lv,parentJob=job); op.Base=[(model,names)]
+            op.Side="Outside"; op.Direction="CW"; op.UseComp=True
+            op.processPerimeter=True; op.processHoles=True; op.processCircles=True; op.ToolController=tc
+            for p in ("StartDepth","FinalDepth","StepDown"): op.setExpression(p,None)
+            op.StartDepth=sheet["zmax"]; op.FinalDepth=sheet["zmin"]; op.StepDown=sheet["zmax"]-sheet["zmin"]
+            ops.append(op)
+        doc.recompute()
+        m.export([tc]+ops,sheet["out"],"--no-show-editor --no-comments")
+        App.closeDocument(doc.Name)
+    open(cfg["done"],"w").write("ok")
 except Exception:
-    open(cfg["out"]+".err","w").write(traceback.format_exc())
+    open(cfg["done"]+".err","w").write(traceback.format_exc())
 '''
 
 def worker_exe():
@@ -361,49 +360,60 @@ def worker_exe():
         if os.path.isfile(f): return f
     return None
 
-def parallel_profiles(faces_by_level,kerf,zmin,zmax,raw,tick=None,workers=WORKERS):
-    """Compute the Profile of the top faces in several FreeCAD processes at once
-    and write one merged linuxcnc program. Returns False to fall back."""
+def parallel_profiles_multi(sheets,kerf,tick=None,workers=WORKERS):
+    """sheets: [(faces_by_level, zmin, zmax, raw_path)]. Compute the CAM profiles
+    of every sheet in ONE round of background FreeCAD processes (their start-up
+    cost is paid once) and write one linuxcnc program per sheet. False = fall back."""
     import subprocess, tempfile, json, shutil
     exe=worker_exe()
-    items=[(lv,f) for lv,f in faces_by_level]
+    items=[(s,lv,f) for s,(faces,zmin,zmax,raw) in enumerate(sheets) for lv,f in faces]
     if not exe or len(items)<2*workers: return False
-    # Balance the bins by number of edges (the CAM cost grows with them).
     bins=[[] for _ in range(workers)]; load=[0]*workers
-    for lv,f in sorted(items,key=lambda x:-len(x[1].Edges)):
-        k=load.index(min(load)); bins[k].append((lv,f)); load[k]+=len(f.Edges)
+    for it in sorted(items,key=lambda x:-len(x[2].Edges)):
+        k=load.index(min(load)); bins[k].append(it); load[k]+=len(it[2].Edges)
     tmp=tempfile.mkdtemp(prefix="plasma_cam_")
     procs=[]
     try:
         for k,b in enumerate(bins):
-            brep=os.path.join(tmp,"caras_%d.brep"%k); out=os.path.join(tmp,"perfil_%d.ngc"%k)
-            Part.makeCompound([f for lv,f in b]).exportBrep(brep)
-            cfg=os.path.join(tmp,"cfg_%d.json"%k)
-            json.dump(dict(brep=brep,out=out,kerf=kerf,zmin=zmin,zmax=zmax,levels=[lv for lv,f in b]),open(cfg,"w"))
+            if not b: continue
+            entries=[]
+            for s in sorted({x[0] for x in b}):
+                faces=[(lv,f) for t,lv,f in b if t==s]
+                brep=os.path.join(tmp,"caras_%d_%d.brep"%(k,s)); out=os.path.join(tmp,"perfil_%d_%d.ngc"%(k,s))
+                Part.makeCompound([f for lv,f in faces]).exportBrep(brep)
+                entries.append(dict(sheet=s,brep=brep,out=out,levels=[lv for lv,f in faces],zmin=sheets[s][1],zmax=sheets[s][2]))
+            cfg=os.path.join(tmp,"cfg_%d.json"%k); done=os.path.join(tmp,"hecho_%d"%k)
+            json.dump(dict(kerf=kerf,sheets=entries,done=done),open(cfg,"w"))
             script=os.path.join(tmp,"trabajo_%d.py"%k); open(script,"w").write(WORKER_SCRIPT%dict(cfg=cfg))
             procs.append((subprocess.Popen([exe,script],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
-                          creationflags=0x08000000 if os.name=="nt" else 0),out))
+                          creationflags=0x08000000 if os.name=="nt" else 0),done,entries))
         t0=time.time()
         while True:
-            done=sum(1 for pr,out in procs if pr.poll() is not None)
-            if tick and tick(done,len(procs),time.time()-t0):
+            finished=sum(1 for pr,d,e in procs if pr.poll() is not None)
+            if tick and tick(finished,len(procs),time.time()-t0):
                 return False
-            if done==len(procs): break
+            if finished==len(procs): break
             QtWidgets.QApplication.processEvents(); time.sleep(0.2)
-        if not all(os.path.exists(out+".ok") and os.path.exists(out) for pr,out in procs):
-            errs=[open(out+".err").read()[-300:] for pr,out in procs if os.path.exists(out+".err")]
+        if not all(os.path.exists(d) for pr,d,e in procs):
+            errs=[open(d+".err").read()[-300:] for pr,d,e in procs if os.path.exists(d+".err")]
             log("Calculo en paralelo fallido, se hace en este FreeCAD: %s"%(errs[0] if errs else "sin resultado"))
             return False
-        with open(raw,"w",newline="\n") as dst:
-            for pr,out in procs: dst.write(open(out).read()+"\n")
-        log("Perfiles calculados en %d procesos en %.0f s"%(len(procs),time.time()-t0))
+        for s,(faces,zmin,zmax,raw) in enumerate(sheets):
+            with open(raw,"w",newline="\n") as dst:
+                for pr,d,entries in procs:
+                    for e in entries:
+                        if e["sheet"]==s: dst.write(open(e["out"]).read()+"\n")
+        log("Perfiles de %d chapa(s) calculados en %d procesos en %.0f s"%(len(sheets),len(procs),time.time()-t0))
         return True
     finally:
-        for pr,out in procs:
+        for pr,d,e in procs:
             if pr.poll() is None:
                 try: pr.kill()
                 except Exception: pass
         shutil.rmtree(tmp,ignore_errors=True)
+
+def parallel_profiles(faces_by_level,kerf,zmin,zmax,raw,tick=None,workers=WORKERS):
+    return parallel_profiles_multi([(faces_by_level,zmin,zmax,raw)],kerf,tick,workers)
 
 def make_job(doc,i,name,sb,parts,kerf,tool_label,post,with_ops=True):
     import Path, Path.Main.Job as PathJob, Path.Main.Stock as PathStock, Path.Op.Profile as PathProfile
@@ -420,7 +430,12 @@ def make_job(doc,i,name,sb,parts,kerf,tool_label,post,with_ops=True):
     tc=job.Tools.Group[0]; tc.Label="TC: %s"%tool_label; tc.Tool.Label=tool_label; tc.Tool.Diameter=kerf
     tc.HorizFeed="2000 mm/min"; tc.VertFeed="2000 mm/min"; tc.HorizRapid="10000 mm/min"; tc.VertRapid="5000 mm/min"; tc.SpindleSpeed=1
     model=job.Model.Group[0]
-    top=["Face%d"%(k+1) for k,f in enumerate(model.Shape.Faces) if f.normalAt(0,0).z>0.99 and abs(f.CenterOfMass.z-zmax)<0.01]
+    # Top faces: flat at zmax (bounding box test first; CenterOfMass on every
+    # face of hundreds of parts took ~10 s).
+    top=[]
+    for k,f in enumerate(model.Shape.Faces):
+        b=f.BoundBox
+        if b.ZLength<0.01 and abs(b.ZMax-zmax)<0.01 and f.normalAt(0,0).z>0.99: top.append("Face%d"%(k+1))
     # CAM Profile ignores the outline of a face lying inside another face's
     # hole (part-in-part nesting), so every nesting level gets its own profile.
     levels=nesting_levels(model.Shape.Faces,top)
@@ -733,24 +748,34 @@ def mecanizar(doc,groups,kerf,tool_label,post,adapt_qt,opt,outdir,base,save_reta
             QtWidgets.QApplication.processEvents(); return progress.wasCanceled()
         return False
     results=[]; total=len(groups)
+    # Phase 1: CAM jobs of every sheet, then ONE round of background processes
+    # for all their profiles (each round costs ~14 s just to start FreeCAD).
+    pre={}; pooled=False
+    if post=="linuxcnc" and worker_exe():
+        sheets=[]
+        for i,(name,sb,parts) in enumerate(groups,1):
+            tag=("_chapa%d"%i) if total>1 else ""
+            if step("%s: preparando el trabajo CAM (%d piezas)..."%(name,len(parts)),int(5*(i-1)/total)): return results
+            pre[i]=make_job(doc,i,name,sb,parts,kerf,tool_label,post,with_ops=False)
+            bb=pre[i][3].Shape.BoundBox
+            sheets.append((pre[i][6],bb.ZMin,bb.ZMax,os.path.join(outdir,"%s%s_%s.ngc"%(base,tag,post))))
+        def ptick(done,n,secs):
+            return step("Calculando los perfiles de %d chapa(s) en %d nucleos a la vez (%d de %d terminados, %.0f s)..."%(total,n,done,n,secs),
+                        int(5+30*done/max(n,1)))
+        pooled=parallel_profiles_multi(sheets,kerf,ptick)
+        if not pooled:
+            if progress and progress.wasCanceled(): return results
+            for i,v in pre.items(): remove_job(doc,v[0],"Plasma_Piezas_%d"%i)   # classic in-process profiles
+            pre={}
     for i,(name,sb,parts) in enumerate(groups,1):
         tag=("_chapa%d"%i) if total>1 else ""
-        if step("%s: creando trabajo CAM, material y herramienta (%d piezas)..."%(name,len(parts)),int(100*(i-1)/total)): return results
+        if step("%s: %d piezas..."%(name,len(parts)),int(35+65*(i-1)/total)): return results
         raw=os.path.join(outdir,"%s%s_%s.ngc"%(base,tag,post))
-        parallel=False
-        if post=="linuxcnc" and worker_exe():
-            job,tc,ops,model,ntop,th,top_faces=make_job(doc,i,name,sb,parts,kerf,tool_label,post,with_ops=False)
-            bb=model.Shape.BoundBox
-            def ptick(done,n,secs):
-                return step("%s: calculando los perfiles de corte en %d nucleos a la vez (%d de %d terminados, %.0f s)..."%(name,n,done,n,secs),
-                            int(100*(i-1)/total+3*done/max(n,1)))
-            parallel=parallel_profiles(top_faces,kerf,bb.ZMin,bb.ZMax,raw,ptick)
-            if not parallel:
-                if progress and progress.wasCanceled(): return results
-                remove_job(doc,job,"Plasma_Piezas_%d"%i)   # fall back to the classic in-process profiles
-            else:
-                show_program_in_job(doc,i,name,job,tc,raw)
-        if not parallel:
+        parallel=pooled and i in pre
+        if parallel:
+            job,tc,ops,model,ntop,th,top_faces=pre[i]
+            show_program_in_job(doc,i,name,job,tc,raw)
+        else:
             job,tc,ops,model,ntop,th,_=make_job(doc,i,name,sb,parts,kerf,tool_label,post)
         Gui.ActiveDocument.ActiveView.viewTop(); Gui.SendMsgToActiveView("ViewFit"); QtWidgets.QApplication.processEvents()
         if step("%s: perfil calculado (%d caras). Postprocesando con %s..."%(name,ntop,post)): return results
@@ -769,7 +794,7 @@ def mecanizar(doc,groups,kerf,tool_label,post,adapt_qt,opt,outdir,base,save_reta
             def tick(n,N):
                 if progress:
                     progress.setLabelText("%s: entradas/salidas y adaptacion a QtPlasmaC (%d/%d)..."%(name,n,N))
-                    progress.setValue(int(100*(i-1)/total + 100/total*n/max(N,1)))
+                    progress.setValue(int(35+65*(i-1)/total + 65/total*n/max(N,1)))
                     QtWidgets.QApplication.processEvents(); return progress.wasCanceled()
                 return False
             r=adapt(raw,dst,faces,sb,opt,"%s %.0f x %.0f mm"%(name,sb.XLength,sb.YLength),tick)

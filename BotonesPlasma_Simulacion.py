@@ -62,25 +62,46 @@ class Simulation(QtWidgets.QDialog):
         super().__init__(Gui.getMainWindow())
         self.setWindowTitle(TITLE)
         self.setWindowFlags(self.windowFlags() | QtCore.Qt.Tool)
-        self.doc = doc
-        self.gcode = gcode
+        self.doc = self.gcode = self.root = None
+        self.t = 0.0
+        self.total = 0.0
+        self.speed = 20
+        self.playing = False
+        self._last = None
+        self._kind = None
+        self.timer = QtCore.QTimer(self)
+        self.timer.setInterval(40)
+        self.timer.timeout.connect(self._tick)
+        self._build_ui()
+        self.load(doc, gcode)
+
+    def load(self, doc, gcode):
+        """Show another machined program in this same window."""
+        if self.playing:
+            self.toggle()
+        self._remove_scene()
+        if self.gcode is not None:
+            try:
+                self.gcode.ViewObject.Visibility = True
+            except Exception:
+                pass
+        self.doc, self.gcode = doc, gcode
         bb = gcode.Shape.BoundBox
         self.z = bb.ZMax + 0.5
         self.steps, self.total = build_path(gcode.Shape.Wires, self.z)
         self.ncuts = sum(1 for s in self.steps if s["kind"] == "cut")
-        self.t = 0.0
-        self.speed = 20
-        self.playing = False
-        self._last = None
+        self._kind = None
+        _bring_to_front(doc)
         self._build_scene()
-        self._build_ui()
-        self.timer = QtCore.QTimer(self)
-        self.timer.setInterval(40)
-        self.timer.timeout.connect(self._tick)
         try:
             gcode.ViewObject.Visibility = False
         except Exception:
             pass
+        try:
+            v = Gui.getDocument(doc.Name).activeView(); v.viewTop(); v.fitAll()
+        except Exception:
+            pass
+        self._refresh_programs()
         self._show(0.0)
 
     # ---------------------------------------------------------------- scene
@@ -96,9 +117,9 @@ class Simulation(QtWidgets.QDialog):
         self.cut_coords = coin.SoCoordinate3(); self.cut_lines = coin.SoLineSet()
         for n in (mat, style, self.cut_coords, self.cut_lines):
             self.cut_sep.addChild(n)
-        # rapids done (blue, dashed)
+        # rapids done (green, dashed)
         self.rap_sep = coin.SoSeparator()
-        mat2 = coin.SoMaterial(); mat2.diffuseColor.setValue(0.1, 0.35, 0.95); mat2.emissiveColor.setValue(0.0, 0.2, 0.6)
+        mat2 = coin.SoMaterial(); mat2.diffuseColor.setValue(0.1, 0.75, 0.2); mat2.emissiveColor.setValue(0.0, 0.45, 0.1)
         style2 = coin.SoDrawStyle(); style2.lineWidth = 1.0; style2.linePattern = 0xF0F0
         self.rap_coords = coin.SoCoordinate3(); self.rap_lines = coin.SoLineSet()
         for n in (mat2, style2, self.rap_coords, self.rap_lines):
@@ -106,7 +127,7 @@ class Simulation(QtWidgets.QDialog):
         # torch
         self.torch_sep = coin.SoSeparator()
         self.torch_pos = coin.SoTranslation()
-        mat3 = coin.SoMaterial(); mat3.diffuseColor.setValue(1.0, 0.85, 0.0); mat3.emissiveColor.setValue(1.0, 0.6, 0.0)
+        mat3 = coin.SoMaterial(); self.torch_mat = mat3  # colour set per frame: blue cutting, green rapid
         # Torch size follows the sheet so it is easy to see on a whole sheet.
         bb = self.gcode.Shape.BoundBox
         r = max(15.0, 0.018 * max(bb.XLength, bb.YLength))
@@ -129,14 +150,24 @@ class Simulation(QtWidgets.QDialog):
         self.view.getSceneGraph().addChild(self.root)
 
     def _remove_scene(self):
+        if self.root is None:
+            return
         try:
             self.view.getSceneGraph().removeChild(self.root)
         except Exception:
             pass
+        self.root = None
 
     # ---------------------------------------------------------------- ui
     def _build_ui(self):
         L = QtWidgets.QVBoxLayout(self)
+        h0 = QtWidgets.QHBoxLayout()
+        h0.addWidget(QtWidgets.QLabel("Programa:"))
+        self.prog_combo = _ProgramCombo(self)
+        self.prog_combo.setToolTip("Todos los programas mecanizados de los documentos abiertos")
+        self.prog_combo.activated.connect(self._pick_program)
+        h0.addWidget(self.prog_combo, 1)
+        L.addLayout(h0)
         self.info = QtWidgets.QLabel()
         L.addWidget(self.info)
         self.slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
@@ -164,11 +195,33 @@ class Simulation(QtWidgets.QDialog):
         close.clicked.connect(self.close)
         h.addWidget(close)
         L.addLayout(h)
-        note = QtWidgets.QLabel("Rojo: cortes hechos · azul discontinuo: movimientos en vacío · "
+        note = QtWidgets.QLabel("Antorcha azul: cortando · antorcha verde: en vacío · rojo: cortes hechos · "
+                                "verde discontinuo: movimientos en vacío · "
                                 "tiempo calculado con 2000 mm/min de corte (en la máquina manda QtPlasmaC).")
         note.setWordWrap(True); note.setStyleSheet("color: gray;")
         L.addWidget(note)
         self.setMinimumWidth(560)
+
+    def _refresh_programs(self):
+        self.progs = all_programs()
+        self.prog_combo.blockSignals(True)
+        self.prog_combo.clear()
+        current = 0
+        for k, (d, g) in enumerate(self.progs):
+            self.prog_combo.addItem("%s  ·  %s" % (d.Label, g.Label))
+            if self.gcode is not None and d.Name == self.doc.Name and g.Name == self.gcode.Name:
+                current = k
+        self.prog_combo.setCurrentIndex(current)
+        self.prog_combo.blockSignals(False)
+
+    def _pick_program(self, index):
+        if 0 <= index < len(self.progs):
+            d, g = self.progs[index]
+            if d.Name != self.doc.Name or g.Name != self.gcode.Name:
+                try:
+                    self.load(d, g)
+                except Exception as e:
+                    App.Console.PrintError("%s: %s\n" % (TITLE, e))
 
     def toggle(self):
         self.playing = not self.playing
@@ -194,7 +247,10 @@ class Simulation(QtWidgets.QDialog):
         cut_counts, rap_counts = [], []
         torch = (0.0, 0.0, self.z)
         done_cuts = 0
+        kind = "rapid"
         for s in self.steps:
+            if s["t0"] < t < s["t1"]:
+                kind = s["kind"]
             pts = s["pts"]
             if t >= s["t1"]:
                 n = len(pts)
@@ -220,6 +276,12 @@ class Simulation(QtWidgets.QDialog):
         self._fix_partial(self.cut_lines, cut_counts, [len(s["pts"]) for s in self.steps if s["kind"] == "cut"])
         self._fix_partial(self.rap_lines, rap_counts, [len(s["pts"]) for s in self.steps if s["kind"] != "cut"])
         self.torch_pos.translation.setValue(*torch)
+        if kind != self._kind:
+            self._kind = kind
+            if kind == "cut":
+                self.torch_mat.diffuseColor.setValue(0.05, 0.35, 1.0); self.torch_mat.emissiveColor.setValue(0.0, 0.2, 0.9)
+            else:
+                self.torch_mat.diffuseColor.setValue(0.1, 0.9, 0.2); self.torch_mat.emissiveColor.setValue(0.0, 0.6, 0.1)
         self.slider.blockSignals(True); self.slider.setValue(int(1000 * t / max(self.total, 1e-9))); self.slider.blockSignals(False)
         self.info.setText("Corte %d de %d  ·  %s de %s" % (done_cuts, self.ncuts, _mmss(t), _mmss(self.total)))
 
@@ -242,6 +304,8 @@ class Simulation(QtWidgets.QDialog):
     def closeEvent(self, event):
         self.timer.stop()
         self._remove_scene()
+        if self in _open:
+            _open.remove(self)
         try:
             self.gcode.ViewObject.Visibility = True
         except Exception:
@@ -255,47 +319,54 @@ def _mmss(seconds):
         seconds // 3600, seconds // 60 % 60, seconds % 60)
 
 
-_open = []
+class _ProgramCombo(QtWidgets.QComboBox):
+    """Re-reads the open documents each time the list is opened."""
+    def showPopup(self):
+        try:
+            self.parent()._refresh_programs()
+        except Exception:
+            pass
+        super().showPopup()
 
 
-def run(doc=None):
-    """Simulate a program; doc given (after Mecanizar plasma) picks that document,
-    otherwise every machined sheet of every open document can be chosen."""
-    docs = [doc] if doc is not None else list(App.listDocuments().values())
-    progs = [(d, g) for d in docs for g, p in program_objects(d)]
-    if not progs:
-        QtWidgets.QMessageBox.information(Gui.getMainWindow(), TITLE,
-            "No hay ningún programa de plasma en los documentos abiertos. Pulsa antes «Mecanizar plasma»."); return
-    doc, gcode = progs[0]
-    if len(progs) > 1:
-        active = App.ActiveDocument
-        names = ["%s  ·  %s" % (d.Label, g.Label) for d, g in progs]
-        start = next((k for k, (d, g) in enumerate(progs) if active is not None and d.Name == active.Name), 0)
-        name, ok = QtWidgets.QInputDialog.getItem(Gui.getMainWindow(), TITLE,
-                                                  "Anidado y chapa a simular:", names, start, False)
-        if not ok: return
-        doc, gcode = progs[names.index(name)]
-    # Bring the 3D view of that document to the front.
+def all_programs(docs=None):
+    docs = docs if docs is not None else list(App.listDocuments().values())
+    return [(d, g) for d in docs for g, p in program_objects(d)]
+
+
+def _bring_to_front(doc):
     App.setActiveDocument(doc.Name)
     try:
         mdi = Gui.getMainWindow().findChild(QtWidgets.QMdiArea)
-        view = Gui.getDocument(doc.Name).activeView()
         for sub in mdi.subWindowList():
             if sub.windowTitle().split(" : ")[0] == doc.Label:
                 mdi.setActiveSubWindow(sub)
                 break
     except Exception:
         pass
-    for old in list(_open):
-        try: old.close()
-        except Exception: pass
-        _open.remove(old)
+    QtWidgets.QApplication.processEvents()
+
+
+_open = []
+
+
+def run(doc=None):
+    """Open the simulation window. Every machined program of every open document
+    can be chosen in its "Programa" list; doc (after Mecanizar plasma) picks the
+    first program of that document."""
+    progs = all_programs()
+    if not progs:
+        QtWidgets.QMessageBox.information(Gui.getMainWindow(), TITLE,
+            "No hay ningún programa de plasma en los documentos abiertos. Pulsa antes «Mecanizar plasma»."); return
+    want = doc if doc is not None else App.ActiveDocument
+    doc, gcode = next(((d, g) for d, g in progs if want is not None and d.Name == want.Name), progs[0])
+    if _open:
+        sim = _open[0]
+        sim.load(doc, gcode)
+        sim.show(); sim.raise_()
+        return sim
     sim = Simulation(doc, gcode)
     _open.append(sim)
-    try:
-        v = Gui.getDocument(doc.Name).activeView(); v.viewTop(); v.fitAll()
-    except Exception:
-        pass
     sim.show()
     try:  # bottom of the main window, so it does not cover the sheet
         g = Gui.getMainWindow().geometry()
