@@ -52,14 +52,20 @@ def collect(job_dir, res, settings):
         thickness = zmax - zmin
     groups = {}
     for p in parts:
-        label = re.sub(r"\d{3}$", "", p.Label) or p.Label
+        # Same source part = same type (FreeCAD renumbers the labels of copies:
+        # Placa_20x200_10, Placa_20x200_11...). The first copy keeps the name.
+        if "SourcePartIndex" in p.PropertiesList:
+            key = "src_%s" % p.SourcePartIndex
+        else:
+            key = re.sub(r"\d{3}$", "", p.Label) or p.Label
+        label = groups[key]["label"] if key in groups else p.Label
         face = None
         for f in p.Shape.Faces:
             b = f.BoundBox
             if b.ZLength < 0.01 and abs(b.ZMax - p.Shape.BoundBox.ZMax) < 0.01:
                 if face is None or f.Area > face.Area:
                     face = f
-        g = groups.setdefault(label, dict(label=label, faces=[], count=0, area=0.0, holes=0,
+        g = groups.setdefault(key, dict(label=label, faces=[], count=0, area=0.0, holes=0,
                                           size=(p.Shape.BoundBox.XLength, p.Shape.BoundBox.YLength)))
         g["count"] += 1
         if face is not None:
@@ -180,6 +186,11 @@ COLOURS = ((231, 76, 60), (52, 152, 219), (46, 204, 113), (155, 89, 182), (241, 
 def _fmt(v, d=0):
     s = ("{:,.%df}" % d).format(v)
     return s.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def _elide(text, n):
+    text = str(text or "")
+    return text if len(text) <= n else "…" + text[-(n - 1):]
 
 
 def _time(minutes):
@@ -315,9 +326,9 @@ def build(data, png_preview=None):
         line(a, 9, True, col, (70, 70, 70), advance=False)
         line(b, 9.5, False, col + 46 * dpm)
     y = max(y, yl) + 1 * dpm
-    line("Entradas/salidas: exteriores %s · interiores %s" % (lead_txt(leads.get("ext")), lead_txt(leads.get("int"))),
-         8, False, 0, (90, 90, 90))
-    line("Programa: %s" % data["program"], 8, False, 0, (90, 90, 90))
+    line("Entradas/salidas exteriores: %s" % lead_txt(leads.get("ext")), 8, False, 0, (90, 90, 90))
+    line("Entradas/salidas interiores: %s" % lead_txt(leads.get("int")), 8, False, 0, (90, 90, 90))
+    line("Programa: %s" % _elide(data["program"], 110), 8, False, 0, (90, 90, 90))
     if data.get("retal"):
         line("Retal: %s (%s)" % (os.path.basename(data["retal"]), data.get("retal_info", "")), 8, False, 0, (90, 90, 90))
     y += 3 * dpm
@@ -428,8 +439,10 @@ def build(data, png_preview=None):
     p.drawText(QtCore.QPointF(xs[2] + 1 * dpm, y + fm.ascent()), "%d" % data["parts"])
     p.drawText(QtCore.QPointF(xs[7] + 1 * dpm, y + fm.ascent()), _fmt(total_w, 1))
     y += fm.height() * 2
-    line("Pesos aproximados con densidad %s kg/dm³ (%s). Tiempo de corte estimado con el avance indicado; "
-         "en la máquina manda la tabla de corte de QtPlasmaC." % (_fmt(dens * 1e6, 2), material), 7.5, False, 0, (90, 90, 90))
+    line("Pesos aproximados con densidad %s kg/dm³%s." % (
+        _fmt(dens * 1e6, 2), (" (%s)" % data["material"]) if data["material"] else " (acero)"), 7.5, False, 0, (90, 90, 90))
+    line("Tiempo de corte estimado con el avance indicado; en la máquina manda la tabla de corte de QtPlasmaC.",
+         7.5, False, 0, (90, 90, 90))
     line("Antes de cortar: elige el material en QtPlasmaC y haz una pasada en vacío.", 7.5, False, 0, (90, 90, 90))
     p.end()
     if png_preview:
