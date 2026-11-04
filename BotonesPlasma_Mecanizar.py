@@ -581,11 +581,22 @@ def restore_cursor():
     while QtWidgets.QApplication.overrideCursor() is not None and n<50:
         QtWidgets.QApplication.restoreOverrideCursor(); n+=1
 
+def sim_accuracy(job):
+    """CAM simulator accuracy (1-10). High accuracy on a whole sheet builds a
+    huge model and freezes the simulator, so large sheets use a low value."""
+    try:
+        b=job.Stock.Shape.BoundBox; area=b.XLength*b.YLength/1e6
+    except Exception: return 3
+    return 2 if area>2 else 3 if area>0.5 else 5 if area>0.1 else 8
+
 def open_simulator(job):
     def _play():
         restore_cursor()
         try:
             mw=Gui.getMainWindow()
+            for sl in mw.findChildren(QtWidgets.QSlider):
+                if sl.objectName()=="sliderAccuracy" and sl.isVisible():
+                    sl.setValue(max(sl.minimum(),min(sl.maximum(),sim_accuracy(job))))
             for dw in mw.findChildren(QtWidgets.QDockWidget):
                 for cb in dw.findChildren(QtWidgets.QComboBox):
                     if cb.isVisible() and cb.findText(job.Label)>=0: cb.setCurrentIndex(cb.findText(job.Label))
