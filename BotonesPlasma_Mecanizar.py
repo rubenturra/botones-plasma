@@ -742,6 +742,10 @@ class Dialog(QtWidgets.QDialog):
 def mecanizar(doc,groups,kerf,tool_label,post,adapt_qt,opt,outdir,base,save_retal=False,progress=None,make_simulation=True):
     def step(txt,val=None):
         log(txt)
+        # CAM creates its objects in the ACTIVE document: keep ours active.
+        if App.ActiveDocument is None or App.ActiveDocument.Name!=doc.Name:
+            try: App.setActiveDocument(doc.Name)
+            except Exception: pass
         if progress:
             progress.setLabelText(txt)
             if val is not None: progress.setValue(val)
