@@ -187,20 +187,52 @@ def _time(minutes):
     return "%d h %02d min" % (s // 3600, s // 60 % 60) if s >= 3600 else "%d min %02d s" % (s // 60, s % 60)
 
 
-def build(data):
+def build(data, png_preview=None):
     try:
         from PySide6 import QtGui, QtCore
     except ImportError:
         from PySide2 import QtGui, QtCore
     app = QtGui.QGuiApplication.instance() or QtGui.QGuiApplication(["informe"])
-    pdf = QtGui.QPdfWriter(data["pdf"])
-    pdf.setPageSize(QtGui.QPageSize(QtGui.QPageSize.A4))
-    pdf.setPageMargins(QtCore.QMarginsF(12, 12, 12, 12), QtGui.QPageLayout.Millimeter)
-    pdf.setResolution(200)
-    pdf.setTitle("Programa plasma %s - %s" % (data["document"], data["sheet"]))
-    pdf.setCreator("Botones plasma")
-    dpm = 200 / 25.4                       # dots per mm
-    p = QtGui.QPainter(pdf)
+    dpi = 200
+    dpm = dpi / 25.4                       # dots per mm
+    p = QtGui.QPainter()
+    images = []
+
+    class Pages:
+        """PDF pages, or PNG images of the same pages (png_preview) to check them."""
+        def __init__(self):
+            if png_preview:
+                self.dev = None
+                self.newPage(first=True)
+            else:
+                self.dev = QtGui.QPdfWriter(data["pdf"])
+                self.dev.setPageSize(QtGui.QPageSize(QtGui.QPageSize.A4))
+                self.dev.setPageMargins(QtCore.QMarginsF(12, 12, 12, 12), QtGui.QPageLayout.Millimeter)
+                self.dev.setResolution(dpi)
+                self.dev.setTitle("Programa plasma %s - %s" % (data["document"], data["sheet"]))
+                self.dev.setCreator("Botones plasma")
+                p.begin(self.dev)
+
+        def newPage(self, first=False):
+            if not png_preview:
+                self.dev.newPage()
+                return
+            if not first:
+                p.end()
+            im = QtGui.QImage(int(186 * dpm), int(273 * dpm), QtGui.QImage.Format_RGB32)
+            im.setDotsPerMeterX(int(dpi / 0.0254)); im.setDotsPerMeterY(int(dpi / 0.0254))
+            im.fill(QtGui.QColor(255, 255, 255))
+            images.append(im)
+            self.dev = im
+            p.begin(im)
+
+        def width(self):
+            return self.dev.width()
+
+        def height(self):
+            return self.dev.height()
+
+    pdf = Pages()
     W = pdf.width()
     H = pdf.height()
 
@@ -209,7 +241,7 @@ def build(data):
         f.setPointSizeF(size)
         f.setBold(bold)
         p.setFont(f)
-        return QtGui.QFontMetricsF(f, pdf)
+        return QtGui.QFontMetricsF(f, pdf.dev)
 
     y = 0.0
 
@@ -400,4 +432,7 @@ def build(data):
          "en la máquina manda la tabla de corte de QtPlasmaC." % (_fmt(dens * 1e6, 2), material), 7.5, False, 0, (90, 90, 90))
     line("Antes de cortar: elige el material en QtPlasmaC y haz una pasada en vacío.", 7.5, False, 0, (90, 90, 90))
     p.end()
+    if png_preview:
+        for k, im in enumerate(images):
+            im.save("%s_%d.png" % (png_preview, k + 1))
     del app
