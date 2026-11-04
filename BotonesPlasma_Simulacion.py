@@ -280,4 +280,9 @@ def run(doc=None):
     except Exception:
         pass
     sim.show()
+    try:  # bottom of the main window, so it does not cover the sheet
+        g = Gui.getMainWindow().geometry()
+        sim.move(g.x() + 300, g.y() + g.height() - sim.height() - 60)
+    except Exception:
+        pass
     return sim
