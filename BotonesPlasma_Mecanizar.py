@@ -837,6 +837,8 @@ def main():
     if not ok: msg+="\n\nAlgo no cuadra: revisa el programa antes de cortar."
     msg+="\n\nAntes de cortar: elige el material en QtPlasmaC y haz una pasada en vacio."
     sims=[r["sim"] for r in res if r.get("sim")]
-    if sims: msg+="\n\nSe abre el simulador con '%s'. Arrastra la barra para avanzar; a x1 va a velocidad real."%sims[-1].Label
+    if sims: msg+="\n\nSe abre la simulacion de corte en la vista 3D: Reproducir, velocidad y barra para avanzar."
     log(msg); QtWidgets.QMessageBox.information(Gui.getMainWindow(),TITLE,msg)
-    if sims: open_simulator(sims[-1])
+    if sims:
+        import BotonesPlasma_Simulacion
+        QtCore.QTimer.singleShot(300, lambda: BotonesPlasma_Simulacion.run(doc))
