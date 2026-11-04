@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<package format="1" xmlns="https://wiki.freecad.org/Package_Metadata">
+  <name>Botones plasma</name>
+  <description>Botones para corte por plasma en FreeCAD CAM: Mecanizar plasma (trabajo CAM por chapa, postprocesador, adaptación a QtPlasmaC, entradas/salidas, retal para 1st Nesting y simulación).</description>
+  <version>1.0.0</version>
+  <date>2026-11-04</date>
+  <maintainer email="rubenturra@users.noreply.github.com">rubenturra</maintainer>
+  <license file="LICENSE">MIT</license>
+  <url type="repository" branch="main">https://github.com/rubenturra/botones-plasma</url>
+  <icon>icons/mecanizar_plasma.svg</icon>
+  <content>
+    <other>
+      <name>Botones plasma</name>
+      <subdirectory>./</subdirectory>
+      <freecadmin>1.0.0</freecadmin>
+    </other>
+  </content>
+</package>
