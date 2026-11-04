@@ -832,6 +832,9 @@ def mecanizar(doc,groups,kerf,tool_label,post,adapt_qt,opt,outdir,base,save_reta
             pp=doc.addObject("Part::Feature","Plasma_Perforaciones_%d"%i); pp.Label="Perforaciones %s"%name
             pp.Shape=Part.makeCompound([Part.Vertex(App.Vector(x,y,0)) for x,y in r["piers"]]); pp.ViewObject.PointColor=(1.0,0.0,0.0); pp.ViewObject.PointSize=6
             txt=r["text"]
+            # Data for the PDF report (drawn in the background at the end).
+            res["_report"]=dict(doc=doc,index=i,name=name,sb=sb,parts=parts,piers=r["piers"],
+                                cut_length=sum(w.Length for w in r["wires"]),offcut=find_offcut(doc,sb))
             res.update(final=dst,holes=r["holes"],outer=r["outer"],worst=r["worst"],short=r["short"],
                        m3=txt.count("M3 $0 S1"),m5=txt.count("M5 $0"),z=len(re.findall(r"\bZ-?\d",txt)))
             for o in (g,pp): o.recompute()
@@ -853,6 +856,41 @@ def mecanizar(doc,groups,kerf,tool_label,post,adapt_qt,opt,outdir,base,save_reta
         except Exception: pass
         results.append(res)
     return results
+
+def start_reports(res,settings):
+    """Save the report data of every program and draw the PDFs in a background
+    FreeCAD, so machining does not take longer. Returns the PDF paths."""
+    try:
+        import tempfile, BotonesPlasma_Informe as I
+        job_dir=tempfile.mkdtemp(prefix="plasma_informe_")
+        files=[]; pdfs=[]
+        for r in res:
+            if "_report" not in r: continue
+            try:
+                fn=I.collect(job_dir,r,settings)
+                if fn: files.append(fn); pdfs.append(os.path.splitext(r.get("final") or r["raw"])[0]+".pdf")
+            except Exception as e:
+                log("No se ha podido preparar el informe de %s: %s"%(r.get("name"),e))
+        for r in res: r.pop("_report",None)
+        if files and I.launch(files): return pdfs
+    except Exception as e:
+        log("No se han podido crear los informes PDF: %s"%e)
+    return []
+
+def show_report(msg):
+    """Final summary with a scroll bar (a message box grew taller than the screen)."""
+    d=QtWidgets.QDialog(Gui.getMainWindow()); d.setWindowTitle(TITLE)
+    L=QtWidgets.QVBoxLayout(d)
+    t=QtWidgets.QPlainTextEdit(); t.setReadOnly(True); t.setPlainText(msg)
+    f=t.font(); f.setPointSize(max(f.pointSize(),10)); t.setFont(f)
+    L.addWidget(t)
+    bb=QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok); bb.accepted.connect(d.accept); L.addWidget(bb)
+    try:
+        g=Gui.getMainWindow().screen().availableGeometry()
+        d.resize(min(820,int(g.width()*0.6)),min(640,int(g.height()*0.75)))
+    except Exception:
+        d.resize(760,560)
+    d.exec_()
 
 def nesting_documents():
     """Open documents with a nesting result (sheets and parts) to machine."""
@@ -957,7 +995,11 @@ def main():
     msg+="\n\nAntes de cortar: elige el material en QtPlasmaC y haz una pasada en vacio."
     sims=[r["sim"] for r in res if r.get("sim")]
     if sims: msg+="\n\nSe abre la simulacion de corte en la vista 3D: Reproducir, velocidad y barra para avanzar."
-    log(msg); QtWidgets.QMessageBox.information(Gui.getMainWindow(),TITLE,msg)
+    pdfs=start_reports(res,dict(kerf=dlg.kerf.value(),tool=dlg.tool.currentText(),post=dlg.post.currentText(),
+                                feed=2000.0,leads={"ext":opt["ext"],"int":opt["int"]}))
+    if pdfs:
+        msg+="\n\nInformes PDF (se estan creando en segundo plano, junto a cada programa):\n"+"\n".join("   "+f for f in pdfs)
+    log(msg); show_report(msg)
     if sims:
         import BotonesPlasma_Simulacion
         QtCore.QTimer.singleShot(300, lambda: BotonesPlasma_Simulacion.run(doc if len(targets)==1 else None))
