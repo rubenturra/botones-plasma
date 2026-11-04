@@ -25,7 +25,8 @@ def detect(doc,use_selection=True):
     sheets=sorted([o for o in doc.Objects if o.Name.startswith("Sheet_") and o.TypeId=="Part::Feature"],key=lambda s:s.Shape.BoundBox.XMin)
     if sel: parts=sel; source="piezas seleccionadas"
     else:
-        parts=[o for o in doc.Objects if o.Name.startswith("Nesting_") and o.TypeId=="Part::Feature" and o.Shape.Solids]
+        # Nesting results (Nesting_*) and bridge documents (Part_*, JoinedParts_*).
+        parts=[o for o in doc.Objects if o.Name.startswith(("Nesting_","Part_","JoinedParts_")) and o.TypeId=="Part::Feature" and o.Shape.Solids]
         source="resultado del anidado"
     groups=[]
     if sheets:
@@ -376,7 +377,7 @@ def remove_previous(doc):
         for o in j.OutListRecursive: victims.add(o.Name)
     for o in doc.Objects:
         if o.Name.startswith(("Plasma_","Job_Plasma_SIM")): victims.add(o.Name)
-    victims={n for n in victims if not n.startswith(("Nesting_","Sheet","Reusable"))}
+    victims={n for n in victims if not n.startswith(("Nesting_","Sheet","Reusable","Part_","JoinedParts_","Bridges_"))}
     for _ in range(10):
         left=[n for n in victims if doc.getObject(n)]
         if not left: break
@@ -429,6 +430,15 @@ def open_simulator(job):
                 for b in dw.findChildren(QtWidgets.QAbstractButton):
                     if b.isVisible() and b.text() in ("Reproducir","Play","Launch"): b.click(); return
         except Exception as e: log("No se pudo lanzar el simulador: %s"%e)
+    def _to_main_screen():
+        # The simulator opens its own window; keep it on the main screen.
+        try:
+            from PySide import QtGui
+            screen=QtGui.QGuiApplication.primaryScreen(); g=screen.availableGeometry()
+            for w in QtGui.QGuiApplication.topLevelWindows():
+                if w.isVisible() and "CAM Simulator" in w.title() and not g.contains(w.geometry().center()):
+                    w.setScreen(screen); w.setGeometry(g.x()+80,g.y()+80,int(g.width()*0.8),int(g.height()*0.75))
+        except Exception as e: log("No se pudo colocar el simulador: %s"%e)
     def _open():
         restore_cursor()
         try:
@@ -436,6 +446,7 @@ def open_simulator(job):
             Gui.Selection.clearSelection(); Gui.Selection.addSelection(job.Document.Name,job.Name)
             Gui.runCommand("CAM_SimulatorGL")
             QtCore.QTimer.singleShot(800,_play)
+            QtCore.QTimer.singleShot(1500,_to_main_screen)
         except Exception as e: log("No se pudo abrir el simulador: %s"%e)
     QtCore.QTimer.singleShot(300,_open)
 
@@ -608,7 +619,7 @@ def main():
     res=mecanizar(doc,groups,dlg.kerf.value(),dlg.tool.currentText(),dlg.post.currentText(),dlg.qt.isChecked() and dlg.qt.isEnabled(),opt,outdir,base,dlg.retal.isChecked() and dlg.retal.isEnabled(),prog,dlg.sim.isChecked() and dlg.qt.isChecked())
     prog.setValue(100); prog.close(); restore_cursor()
     for o in doc.Objects:
-        if o.Name.startswith("Nesting_") and o.TypeId=="Part::Feature": o.ViewObject.Transparency=50
+        if o.Name.startswith(("Nesting_","Part_","JoinedParts_")) and o.TypeId=="Part::Feature": o.ViewObject.Transparency=50
     Gui.ActiveDocument.ActiveView.viewTop(); Gui.SendMsgToActiveView("ViewFit")
     if doc.FileName: doc.save()
     lines=[]; ok=True
