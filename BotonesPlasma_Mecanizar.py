@@ -1117,7 +1117,25 @@ def activate_doc(doc):
     except Exception: pass
     QtWidgets.QApplication.processEvents()
 
+_progress=[]
+
 def main(auto_docs=None,intro=""):
+    """Mecanizar plasma. If anything fails the progress window is always closed
+    (left open it blocked FreeCAD) and the error is shown."""
+    try:
+        return _main(auto_docs,intro)
+    except Exception:
+        import traceback
+        err=traceback.format_exc(); App.Console.PrintError(err)
+        for p in _progress:
+            try: p.close()
+            except Exception: pass
+        restore_cursor()
+        QtWidgets.QMessageBox.critical(Gui.getMainWindow(),TITLE,"No se ha podido terminar el mecanizado:\n\n"+err[-900:])
+    finally:
+        del _progress[:]
+
+def _main(auto_docs=None,intro=""):
     """auto_docs: machine these nesting results with the options saved last
     time, without showing the window (button "Hacer todo"). intro: text put
     before the final summary."""
@@ -1138,7 +1156,7 @@ def main(auto_docs=None,intro=""):
     opt={"ext":dlg.ext.get(),"int":dlg.int.get(),"kerf":dlg.kerf.value()}
     try: Gui.activateWorkbench("CAMWorkbench")
     except Exception: pass
-    prog=QtWidgets.QProgressDialog("Preparando...","Cancelar",0,100,Gui.getMainWindow()); prog.setWindowTitle(TITLE)
+    prog=QtWidgets.QProgressDialog("Preparando...","Cancelar",0,100,Gui.getMainWindow()); prog.setWindowTitle(TITLE); _progress.append(prog)
     prog.setWindowModality(QtCore.Qt.WindowModal); prog.setMinimumDuration(0); prog.setMinimumWidth(480)
     t0=time.time()
     # One document, or every open nesting result with the same options.
