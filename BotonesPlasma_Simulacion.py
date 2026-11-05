@@ -66,7 +66,7 @@ def cached_path(gcode, z):
     if key not in _path_cache:
         if len(_path_cache) > 40:
             _path_cache.clear()
-        deflection = max(0.2, max(b.XLength, b.YLength) / 6000.0)   # ~ one screen pixel
+        deflection = 0.05     # smooth circles even when zooming in (the program uses true arcs)
         _path_cache[key] = build_path(shape.Wires, z, deflection)
     return _path_cache[key]
 

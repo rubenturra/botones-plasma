@@ -945,6 +945,10 @@ def mecanizar_finish(doc,work,adapted,adapt_qt,opt,base,save_retal,progress,make
             step("%s: creando el G-code y las perforaciones..."%name,int(90+10*(i-1)/total))
             g=doc.addObject("Part::Feature","Plasma_GCode_%d"%i); g.Label="G-code %s (cortes)"%name; g.Shape=r["shape"]
             g.ViewObject.LineColor=(0.0,0.6,0.0); g.ViewObject.LineWidth=2
+            # The program has true arcs (G2/G3); draw them round too (FreeCAD's
+            # default draws a straight segment every 28.5 degrees).
+            try: g.ViewObject.Deviation=0.01; g.ViewObject.AngularDeflection=2.0
+            except Exception: pass
             pp=doc.addObject("Part::Feature","Plasma_Perforaciones_%d"%i); pp.Label="Perforaciones %s"%name
             pp.Shape=Part.makeCompound([Part.Vertex(App.Vector(x,y,0)) for x,y in r["piers"]]); pp.ViewObject.PointColor=(1.0,0.0,0.0); pp.ViewObject.PointSize=6
             txt=r["text"]
