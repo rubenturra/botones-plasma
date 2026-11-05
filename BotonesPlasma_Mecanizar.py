@@ -1161,7 +1161,7 @@ def start_reports(res,settings):
 
 # Paragraphs of the summary that are errors or warnings (by their first line):
 # pieces not nested, programs to review, close pierces, things that failed...
-REPORT_ERROR=re.compile(r"no se han? (anidado|podido|mecanizado|creado|guardado)|sin anidar|siguen en rojo|"
+REPORT_ERROR=re.compile(r"no se han? (anidado|podido|mecanizado|creado|guardado)|\b[1-9]\d* piezas? sin anidar|siguen en rojo|"
                         r"^REVISAR\b|ATENCI[OÓ]N|Algo no cuadra|\bAVISO\b|\bERROR\b|fallid|no cuadra",re.I)
 
 def report_html(msg):
