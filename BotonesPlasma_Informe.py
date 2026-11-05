@@ -215,12 +215,12 @@ def _rings(brep, deflection=0.5):
         wires = sorted(face.Wires, key=lambda w: -w.BoundBox.DiagonalLength)
         rings = []
         for w in wires:
-            pts = []
-            for e in w.OrderedEdges:
-                seg = e.discretize(Deflection=deflection)
-                if pts and (pts[-1] - seg[0]).Length > 1e-3 and (pts[-1] - seg[-1]).Length < 1e-3:
-                    seg = list(reversed(seg))
-                pts += seg
+            # The wire walks its own edges in order (joining edge by edge
+            # mixed up the corners of polygons like a sheet-metal flat).
+            try:
+                pts = w.discretize(Deflection=deflection)
+            except Exception:
+                pts = [v.Point for v in w.OrderedVertexes]
             rings.append([(p.x, p.y) for p in pts])
         if rings:
             out.append((rings[0], rings[1:]))
