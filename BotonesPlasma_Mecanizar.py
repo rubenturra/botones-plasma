@@ -321,7 +321,24 @@ def adapt(raw,dst,faces,sheet,opt,title,tick):
 # ------------------------------------------------------------------ CAM
 # FreeCAD processes that compute the CAM profiles in parallel: every core but
 # one (FreeCAD itself keeps working meanwhile).
-WORKERS=max(2,min(12,(os.cpu_count() or 4)-1))
+def worker_count():
+    """Every core but one (two, and lowest priority, when LinuxCNC runs here)."""
+    try:
+        import BotonesPlasma_Cpu as C
+        return max(1,min(16,C.core_budget()))
+    except Exception:
+        return max(1,min(16,(os.cpu_count() or 4)-1))
+WORKERS=worker_count()   # value at load time; the functions ask again each run
+
+def start_worker(exe,script):
+    """Background FreeCAD below FreeCAD's own priority (far below LinuxCNC)."""
+    import subprocess
+    try:
+        import BotonesPlasma_Cpu as C
+        cmd,opts=C.low_priority([exe,script])
+    except Exception:
+        cmd,opts=[exe,script],({"creationflags":0x08000000} if os.name=="nt" else {})
+    return subprocess.Popen(cmd,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,**opts)
 
 WORKER_SCRIPT=r'''
 import FreeCAD as App, Part, importlib, json, traceback
@@ -357,17 +374,22 @@ except Exception:
 '''
 
 def worker_exe():
-    for n in ("FreeCADCmd.exe","freecadcmd.exe","FreeCADCmd","freecadcmd"):
-        f=os.path.join(App.getHomePath(),"bin",n)
-        if os.path.isfile(f): return f
+    """FreeCAD without window, also on Linux (packages, AppImage, snap, flatpak)."""
+    try:
+        import BotonesPlasma_Cpu as C
+        return C.freecad_cmd()
+    except Exception:
+        for n in ("FreeCADCmd.exe","freecadcmd.exe","FreeCADCmd","freecadcmd"):
+            f=os.path.join(App.getHomePath(),"bin",n)
+            if os.path.isfile(f): return f
     return None
 
-def parallel_profiles_multi(sheets,kerf,tick=None,workers=WORKERS):
+def parallel_profiles_multi(sheets,kerf,tick=None,workers=None):
     """sheets: [(faces_by_level, zmin, zmax, raw_path)]. Compute the CAM profiles
     of every sheet in ONE round of background FreeCAD processes (their start-up
     cost is paid once) and write one linuxcnc program per sheet. False = fall back."""
     import subprocess, tempfile, json, shutil
-    exe=worker_exe()
+    exe=worker_exe(); workers=workers or worker_count()
     items=[(s,lv,f) for s,(faces,zmin,zmax,raw) in enumerate(sheets) for lv,f in faces]
     if not exe or len(items)<2*workers: return False
     bins=[[] for _ in range(workers)]; load=[0]*workers
@@ -387,8 +409,7 @@ def parallel_profiles_multi(sheets,kerf,tick=None,workers=WORKERS):
             cfg=os.path.join(tmp,"cfg_%d.json"%k); done=os.path.join(tmp,"hecho_%d"%k)
             json.dump(dict(kerf=kerf,sheets=entries,done=done),open(cfg,"w"))
             script=os.path.join(tmp,"trabajo_%d.py"%k); open(script,"w").write(WORKER_SCRIPT%dict(cfg=cfg))
-            procs.append((subprocess.Popen([exe,script],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
-                          creationflags=0x08000000 if os.name=="nt" else 0),done,entries))
+            procs.append((start_worker(exe,script),done,entries))
         t0=time.time()
         while True:
             finished=sum(1 for pr,d,e in procs if pr.poll() is not None)
@@ -414,7 +435,7 @@ def parallel_profiles_multi(sheets,kerf,tick=None,workers=WORKERS):
                 except Exception: pass
         shutil.rmtree(tmp,ignore_errors=True)
 
-def parallel_profiles(faces_by_level,kerf,zmin,zmax,raw,tick=None,workers=WORKERS):
+def parallel_profiles(faces_by_level,kerf,zmin,zmax,raw,tick=None,workers=None):
     return parallel_profiles_multi([(faces_by_level,zmin,zmax,raw)],kerf,tick,workers)
 
 def make_job(doc,i,name,sb,parts,kerf,tool_label,post,with_ops=True):
@@ -501,7 +522,7 @@ def show_program_in_job(doc,i,name,job,tc,raw):
         lines=[l.strip() for l in open(raw).read().splitlines()
                if l.strip() and not l.startswith("(") and l.split()[0] in ("G0","G1","G2","G3","G00","G01","G02","G03")]
         op=PathCustom.Create("Plasma_Perfil_%d_paralelo"%i, parentJob=job)
-        op.Label="Corte plasma %s (perfiles calculados en %d nucleos)"%(name,WORKERS)
+        op.Label="Corte plasma %s (perfiles calculados en paralelo)"%name
         op.Source="Text"; op.Gcode=lines; op.ToolController=tc
         op.recompute()
     except Exception as e: log("No se pudo poner el programa en el trabajo CAM: %s"%e)
@@ -941,11 +962,11 @@ except Exception:
     open(cfg["done"]+".err","w").write(traceback.format_exc())
 '''
 
-def parallel_adapt(work,opt,tick=None,workers=WORKERS):
+def parallel_adapt(work,opt,tick=None,workers=None):
     """Lead-ins/outs + QtPlasmaC of every sheet in background FreeCAD processes
     (each takes whole sheets). Returns {sheet index: result} or None."""
     import subprocess, tempfile, shutil
-    exe=worker_exe()
+    exe=worker_exe(); workers=workers or worker_count()
     if not exe: return None
     tmp=tempfile.mkdtemp(prefix="plasma_adapt_")
     procs=[]
@@ -967,8 +988,7 @@ def parallel_adapt(work,opt,tick=None,workers=WORKERS):
             json.dump(dict(jobs=b,opt=opt,done=done),open(cfg,"w",encoding="utf-8"))
             script=os.path.join(tmp,"adaptar_%d.py"%k)
             open(script,"w",encoding="utf-8").write(ADAPT_SCRIPT%dict(moddir=moddir,cfg=cfg))
-            procs.append((subprocess.Popen([exe,script],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
-                          creationflags=0x08000000 if os.name=="nt" else 0),done))
+            procs.append((start_worker(exe,script),done))
         t0=time.time()
         while True:
             finished=sum(1 for pr,d in procs if pr.poll() is not None)

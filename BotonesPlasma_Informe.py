@@ -139,12 +139,8 @@ def launch(job_files):
     import FreeCAD as App
     if not job_files:
         return None
-    exe = None
-    for n in ("FreeCADCmd.exe", "freecadcmd.exe", "FreeCADCmd", "freecadcmd"):
-        f = os.path.join(App.getHomePath(), "bin", n)
-        if os.path.isfile(f):
-            exe = f
-            break
+    import BotonesPlasma_Cpu as C
+    exe = C.freecad_cmd()
     if exe is None:
         return None
     job_dir = os.path.dirname(job_files[0])
@@ -153,8 +149,12 @@ def launch(job_files):
         f.write("# -*- coding: utf-8 -*-\nimport sys\nsys.path.insert(0, %r)\n"
                 "import BotonesPlasma_Informe as I\nI.build_all(%r, %r)\n"
                 % (MODULE_DIR, list(job_files), job_dir))
-    return subprocess.Popen([exe, script], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            creationflags=0x08000000 if os.name == "nt" else 0)
+    try:
+        import BotonesPlasma_Cpu as C
+        cmd, opts = C.low_priority([exe, script])
+    except Exception:
+        cmd, opts = [exe, script], ({"creationflags": 0x08000000} if os.name == "nt" else {})
+    return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **opts)
 
 
 # ---------------------------------------------------------------- en segundo plano
@@ -227,6 +227,9 @@ def build(data, png_preview=None):
         from PySide6 import QtGui, QtCore
     except ImportError:
         from PySide2 import QtGui, QtCore
+    if os.name != "nt" and not QtGui.QGuiApplication.instance():
+        # Linux/macOS: draw without a screen (no window is ever shown).
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QtGui.QGuiApplication.instance() or QtGui.QGuiApplication(["informe"])
     dpi = 200
     dpm = dpi / 25.4                       # dots per mm

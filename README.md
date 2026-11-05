@@ -32,3 +32,15 @@ Antes de cortar: elige el material en QtPlasmaC y haz una pasada en vacío.
 1. *Herramientas → Addon Manager → ⚙ Configuración → Repositorios personalizados*:
    añade `https://github.com/rubenturra/botones-plasma` con la rama `main`.
 2. Instala **botones-plasma** y reinicia FreeCAD.
+
+## Windows y Linux
+
+Funciona igual en Windows y en Linux (FreeCAD de paquete, AppImage, snap o
+flatpak) y en ordenadores con más o menos núcleos:
+
+- los cálculos en paralelo (perfiles, entradas/salidas, informes PDF) usan un
+  FreeCAD sin ventana (`FreeCADCmd`/`freecadcmd`), que se busca solo;
+- usan todos los núcleos menos uno; si **LinuxCNC** está en marcha en el mismo
+  PC dejan dos núcleos libres y arrancan con la prioridad más baja (`nice 19` en
+  Linux), para no molestar nunca al control de la máquina;
+- los informes PDF se dibujan sin pantalla (`QT_QPA_PLATFORM=offscreen` en Linux).

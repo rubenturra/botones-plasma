@@ -28,13 +28,31 @@ def program_objects(doc):
     return sorted(out, key=lambda x: x[0].Name)
 
 
-def build_path(wires, z):
+_path_cache = {}
+
+
+def cached_path(gcode, z):
+    """build_path of a G-code object, remembered while the object is unchanged
+    (reopening the window or switching program is then immediate)."""
+    shape = gcode.Shape
+    b = shape.BoundBox
+    key = (gcode.Document.Name, gcode.Name, len(shape.Edges), round(b.XMin, 3), round(b.YMin, 3),
+           round(b.XMax, 3), round(b.YMax, 3), round(shape.Length, 3), round(z, 3))
+    if key not in _path_cache:
+        if len(_path_cache) > 40:
+            _path_cache.clear()
+        deflection = max(0.2, max(b.XLength, b.YLength) / 6000.0)   # ~ one screen pixel
+        _path_cache[key] = build_path(shape.Wires, z, deflection)
+    return _path_cache[key]
+
+
+def build_path(wires, z, deflection=0.2):
     """Cut polylines in cut order and the rapid moves between them."""
     cuts = []
     for w in wires:
         pts = []
         for e in w.OrderedEdges if hasattr(w, "OrderedEdges") else w.Edges:
-            seg = e.discretize(Deflection=0.2) if e.Curve.TypeId != "Part::GeomLine" else [e.Vertexes[0].Point, e.Vertexes[-1].Point]
+            seg = e.discretize(Deflection=deflection) if e.Curve.TypeId != "Part::GeomLine" else [e.Vertexes[0].Point, e.Vertexes[-1].Point]
             if pts and (pts[-1] - seg[0]).Length > 1e-3 and (pts[-1] - seg[-1]).Length < 1e-3:
                 seg = list(reversed(seg))
             pts += seg if not pts else seg[1:]
@@ -88,8 +106,10 @@ class Simulation(QtWidgets.QDialog):
         self.doc, self.gcode = doc, gcode
         bb = gcode.Shape.BoundBox
         self.z = bb.ZMax + 0.5
-        self.steps, self.total = build_path(gcode.Shape.Wires, self.z)
+        self.steps, self.total = cached_path(gcode, self.z)
         self.ncuts = sum(1 for s in self.steps if s["kind"] == "cut")
+        self._cut_full = [len(s["pts"]) for s in self.steps if s["kind"] == "cut"]
+        self._rap_full = [len(s["pts"]) for s in self.steps if s["kind"] != "cut"]
         self._kind = None
         _bring_to_front(doc)
         self._build_scene()
@@ -273,8 +293,8 @@ class Simulation(QtWidgets.QDialog):
                         break
                     acc += d; n = i + 2
             (cut_counts if s["kind"] == "cut" else rap_counts).append(n)
-        self._fix_partial(self.cut_lines, cut_counts, [len(s["pts"]) for s in self.steps if s["kind"] == "cut"])
-        self._fix_partial(self.rap_lines, rap_counts, [len(s["pts"]) for s in self.steps if s["kind"] != "cut"])
+        self._fix_partial(self.cut_lines, cut_counts, self._cut_full)
+        self._fix_partial(self.rap_lines, rap_counts, self._rap_full)
         self.torch_pos.translation.setValue(*torch)
         if kind != self._kind:
             self._kind = kind
