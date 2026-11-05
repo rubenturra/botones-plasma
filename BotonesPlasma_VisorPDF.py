@@ -46,6 +46,21 @@ def all_pdfs():
     return sorted(found.values(), key=lambda f: os.path.getmtime(f), reverse=True)
 
 
+def label(pdf):
+    """Two short lines: nesting and sheet / program name and date."""
+    import re
+    name = os.path.basename(pdf)
+    if name.endswith("_QtPlasmaC.pdf"):
+        name = name[:-len("_QtPlasmaC.pdf")]
+    when = time.strftime("%d/%m/%Y %H:%M", time.localtime(os.path.getmtime(pdf)))
+    m = re.match(r"^(.*?)-(\d{8})-(\d{4})(?:_(.*?))?(?:_chapa(\d+))?$", name)
+    if not m:
+        return "%s\n%s" % (name, when)
+    program, doc, sheet = m.group(1), m.group(4) or "", m.group(5)
+    first = " · ".join(x for x in (doc.replace("Nesting_Result_", "Anidado "), ("chapa %s" % sheet) if sheet else "") if x)
+    return "%s\n%s · %s" % (first or program, program, when)
+
+
 class Viewer(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
@@ -101,8 +116,7 @@ class Viewer(QtWidgets.QWidget):
         self.list.blockSignals(True)
         self.list.clear()
         for f in self.pdfs:
-            name = os.path.basename(f)[:-len("_QtPlasmaC.pdf")] if f.endswith("_QtPlasmaC.pdf") else os.path.basename(f)
-            item = QtWidgets.QListWidgetItem("%s\n%s" % (name, time.strftime("%d/%m/%Y %H:%M", time.localtime(os.path.getmtime(f)))))
+            item = QtWidgets.QListWidgetItem(label(f))
             item.setToolTip(f)
             self.list.addItem(item)
         self.list.blockSignals(False)
