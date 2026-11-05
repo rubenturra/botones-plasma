@@ -17,7 +17,10 @@ def ensure_toolbar(workbench, group, title, commands):
     bar = toolbars.GetGroup(group)
     bar.SetString("Name", title)
     bar.SetBool("Active", True)
-    for command in commands:
-        if not bar.GetString(command, ""):
-            bar.SetString(command, "FreeCAD")
+    if any(not bar.GetString(c, "") for c in commands):
+        # A new button: rewrite the bar so the buttons keep their order.
+        for c in commands:
+            bar.RemString(c)
+        for c in commands:
+            bar.SetString(c, "FreeCAD")
     flags.SetBool(key, True)

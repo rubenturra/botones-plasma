@@ -55,14 +55,31 @@ class _SimularPlasma:
         return FreeCAD.ActiveDocument is not None
 
 
+class _InformesPlasma:
+    def GetResources(self):
+        import BotonesPlasma_Gui
+        return {"Pixmap": BotonesPlasma_Gui.icon("informes_plasma.svg"),
+                "MenuText": "Informes PDF de plasma",
+                "ToolTip": "Abrir la pestaña con los informes PDF de los programas de plasma"}
+
+    def Activated(self):
+        import BotonesPlasma_VisorPDF
+        BotonesPlasma_VisorPDF.show()
+
+    def IsActive(self):
+        return True
+
+
 Gui.addCommand("BotonesPlasma_Mecanizar", _MecanizarPlasma())
+Gui.addCommand("BotonesPlasma_Informes", _InformesPlasma())
 Gui.addCommand("BotonesPlasma_Simular", _SimularPlasma())
 Gui.addCommand("BotonesPlasma_Deshacer", _DeshacerPlasma())
 
 try:
     from BotonesToolbar_Plasma import ensure_toolbar
     ensure_toolbar("CAMWorkbench", "Custom_BotonesPlasma", "Plasma",
-                   ["BotonesPlasma_Mecanizar", "BotonesPlasma_Simular", "BotonesPlasma_Deshacer"])
+                   ["BotonesPlasma_Mecanizar", "BotonesPlasma_Simular", "BotonesPlasma_Informes",
+                    "BotonesPlasma_Deshacer"])
 except Exception as _e:
     App.Console.PrintWarning("Botones plasma: no se pudo crear la barra (%s)\n" % _e)
 

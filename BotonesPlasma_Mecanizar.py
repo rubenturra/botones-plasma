@@ -384,7 +384,7 @@ def worker_exe():
             if os.path.isfile(f): return f
     return None
 
-def parallel_profiles_multi(sheets,kerf,tick=None,workers=None):
+def parallel_profiles_multi(sheets,kerf,tick=None,workers=None,background=None):
     """sheets: [(faces_by_level, zmin, zmax, raw_path)]. Compute the CAM profiles
     of every sheet in ONE round of background FreeCAD processes (their start-up
     cost is paid once) and write one linuxcnc program per sheet. False = fall back."""
@@ -415,6 +415,11 @@ def parallel_profiles_multi(sheets,kerf,tick=None,workers=None):
             finished=sum(1 for pr,d,e in procs if pr.poll() is not None)
             if tick and tick(finished,len(procs),time.time()-t0):
                 return False
+            if background:
+                # FreeCAD works too while the processes compute: one job of
+                # the list (e.g. creating a CAM job in the document) per turn.
+                background.pop(0)()
+                continue
             if finished==len(procs): break
             QtWidgets.QApplication.processEvents(); time.sleep(0.2)
         if not all(os.path.exists(d) for pr,d,e in procs):
@@ -807,17 +812,38 @@ def stepper(doc,progress):
         return False
     return step
 
+def sheet_faces(parts):
+    """(faces by nesting level, zmin, zmax) of a sheet straight from its parts:
+    the same top faces the CAM job uses, without building the job first."""
+    zmin=min(p.Shape.BoundBox.ZMin for p in parts); zmax=max(p.Shape.BoundBox.ZMax for p in parts)
+    top=[]
+    for p in parts:
+        for f in p.Shape.Faces:
+            b=f.BoundBox
+            if b.ZLength<0.01 and abs(b.ZMax-zmax)<0.01 and f.normalAt(0,0).z>0.99: top.append(f)
+    names=["Face%d"%(k+1) for k in range(len(top))]
+    levels=nesting_levels(top,names)
+    return [(levels[n],top[k]) for k,n in enumerate(names)],zmin,zmax
+
 def prepare_jobs(doc,groups,kerf,tool_label,post,outdir,base,progress=None):
-    """CAM jobs (without profiles) of every sheet of doc. Returns (pre, sheets)
-    for parallel_profiles_multi, or None when cancelled."""
-    step=stepper(doc,progress); total=len(groups); pre={}; sheets=[]
+    """Faces of every sheet for parallel_profiles_multi, plus the CAM jobs to
+    create (without profiles) as a list of tasks that run WHILE the background
+    processes compute. Returns (pre, sheets, tasks) or None when cancelled;
+    pre is filled by the tasks."""
+    step=stepper(doc,progress); total=len(groups); pre={}; sheets=[]; tasks=[]
     for i,(name,sb,parts) in enumerate(groups,1):
         tag=("_chapa%d"%i) if total>1 else ""
-        if step("%s - %s: preparando el trabajo CAM (%d piezas)..."%(doc.Label,name,len(parts))): return None
-        pre[i]=make_job(doc,i,name,sb,parts,kerf,tool_label,post,with_ops=False)
-        bb=pre[i][3].Shape.BoundBox
-        sheets.append((pre[i][6],bb.ZMin,bb.ZMax,os.path.join(outdir,"%s%s_%s.ngc"%(base,tag,post))))
-    return pre,sheets
+        if step("%s - %s: buscando las caras de corte (%d piezas)..."%(doc.Label,name,len(parts))): return None
+        faces,zmin,zmax=sheet_faces(parts)
+        sheets.append((faces,zmin,zmax,os.path.join(outdir,"%s%s_%s.ngc"%(base,tag,post))))
+        def task(i=i,name=name,sb=sb,parts=parts):
+            if App.ActiveDocument is None or App.ActiveDocument.Name!=doc.Name: App.setActiveDocument(doc.Name)
+            pre[i]=make_job(doc,i,name,sb,parts,kerf,tool_label,post,with_ops=False)
+        tasks.append(task)
+    return pre,sheets,tasks
+
+def run_tasks(tasks):
+    while tasks: tasks.pop(0)()
 
 def drop_prepared(doc,pre):
     for i,v in pre.items(): remove_job(doc,v[0],"Plasma_Piezas_%d"%i)
@@ -843,8 +869,10 @@ def mecanizar(doc,groups,kerf,tool_label,post,adapt_qt,opt,outdir,base,save_reta
     elif post=="linuxcnc" and worker_exe():
         r=prepare_jobs(doc,groups,kerf,tool_label,post,outdir,base,progress)
         if r is None: return results
-        pre,sheets=r
-        pooled=parallel_profiles_multi(sheets,kerf,pool_tick(progress,total))
+        pre,sheets,tasks=r
+        pooled=parallel_profiles_multi(sheets,kerf,pool_tick(progress,total),background=tasks)
+        if not (progress and progress.wasCanceled()):
+            run_tasks(tasks)   # jobs not created yet (processes finished first, or fallback)
         if not pooled:
             if progress and progress.wasCanceled(): return results
             drop_prepared(doc,pre)   # classic in-process profiles
@@ -1049,6 +1077,20 @@ def show_report(msg):
         d.resize(760,560)
     d.exec_()
 
+def frame_sheets(doc):
+    """Top view of every sheet of the document (fitAll walks thousands of
+    objects and took ~3 s per document)."""
+    try:
+        view=Gui.getDocument(doc.Name).activeView()
+        box=App.BoundBox()
+        for o in doc.Objects:
+            if o.Name.startswith("Sheet_") and hasattr(o,"Shape"): box.add(o.Shape.BoundBox)
+        if not box.isValid(): view.viewTop(); view.fitAll(); return
+        import BotonesPlasma_Simulacion as S
+        S.frame_sheet(view,box,1.05)
+    except Exception:
+        pass
+
 def nesting_documents():
     """Open documents with a nesting result (sheets and parts) to machine."""
     out=[]
@@ -1110,15 +1152,16 @@ def main(auto_docs=None,intro=""):
     # document in ONE round of background processes (start-up paid once).
     prepared={}
     if len(targets)>1 and post=="linuxcnc" and worker_exe():
-        allsheets=[]; owner=[]
+        allsheets=[]; owner=[]; alltasks=[]
         for d,groups in targets:
             if prog.wasCanceled(): break
             activate_doc(d); clean(d)
             r=prepare_jobs(d,groups,kerf,tool,post,outdir,dbases[d.Name],prog)
             if r is None: break
-            prepared[d.Name]=r[0]; allsheets+=r[1]; owner+=[d]*len(r[1])
+            prepared[d.Name]=r[0]; allsheets+=r[1]; owner+=[d]*len(r[1]); alltasks+=r[2]
         ok=(not prog.wasCanceled()) and len(prepared)==len(targets) and \
-           parallel_profiles_multi(allsheets,kerf,pool_tick(prog,len(allsheets),len(targets)))
+           parallel_profiles_multi(allsheets,kerf,pool_tick(prog,len(allsheets),len(targets)),background=alltasks)
+        if not prog.wasCanceled(): run_tasks(alltasks)
         if not ok:
             for d,g in targets:
                 if d.Name in prepared: drop_prepared(d,prepared[d.Name])
@@ -1159,11 +1202,17 @@ def main(auto_docs=None,intro=""):
         for r in part:
             if len(targets)>1: r["name"]="%s · %s"%(d.Label,r["name"])
         res+=part
+        prog.setLabelText("%s: ajustando la vista..."%d.Label); QtWidgets.QApplication.processEvents()
         for o in d.Objects:
             if o.Name.startswith(("Nesting_","Part_","JoinedParts_")) and o.TypeId=="Part::Feature": o.ViewObject.Transparency=50
-        try: Gui.getDocument(d.Name).activeView().viewTop(); Gui.getDocument(d.Name).activeView().fitAll()
-        except Exception: pass
-        if d.FileName: d.save()
+        frame_sheets(d)
+        if d.FileName:
+            prog.setLabelText("%s: guardando el documento..."%d.Label); QtWidgets.QApplication.processEvents()
+            d.save()
+    prog.setValue(99)
+    prog.setLabelText("Preparando los informes PDF (se dibujan en segundo plano)..."); QtWidgets.QApplication.processEvents()
+    pdfs=start_reports(res,dict(kerf=dlg.kerf.value(),tool=dlg.tool.currentText(),post=dlg.post.currentText(),
+                                feed=2000.0,leads={"ext":opt["ext"],"int":opt["int"]})) if not prog.wasCanceled() else []
     prog.setValue(100); prog.close(); restore_cursor()
     activate_doc(doc)
     lines=[]; ok=True
@@ -1184,8 +1233,6 @@ def main(auto_docs=None,intro=""):
     msg+="\n\nAntes de cortar: elige el material en QtPlasmaC y haz una pasada en vacio."
     sims=[r["sim"] for r in res if r.get("sim")]
     if sims: msg+="\n\nSe abre la simulacion de corte en la vista 3D: Reproducir, velocidad y barra para avanzar."
-    pdfs=start_reports(res,dict(kerf=dlg.kerf.value(),tool=dlg.tool.currentText(),post=dlg.post.currentText(),
-                                feed=2000.0,leads={"ext":opt["ext"],"int":opt["int"]}))
     if pdfs:
         msg+="\n\nInformes PDF (se estan creando en segundo plano, junto a cada programa):\n"+"\n".join("   "+f for f in pdfs)
     log(msg); show_report(msg)
