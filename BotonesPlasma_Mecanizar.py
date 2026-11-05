@@ -828,12 +828,30 @@ def mecanizar(doc,groups,kerf,tool_label,post,adapt_qt,opt,outdir,base,save_reta
             if progress and progress.wasCanceled(): return results
             drop_prepared(doc,pre)   # classic in-process profiles
             pre={}
-    # Phase 2: put each program in its CAM job (no view refresh per sheet: fitting
-    # the 3D view of a full sheet cost ~4 s every time).
+    work=mecanizar_programs(doc,groups,kerf,tool_label,post,adapt_qt,outdir,base,step,pre,pooled)
+    if work is None: return results
+    # Phase 3: lead-ins/outs and QtPlasmaC, every sheet at the same time in
+    # background FreeCAD processes (one sheet each); in this FreeCAD as fallback.
+    adapted={}
+    if adapt_qt and len(work)>=2 and worker_exe():
+        adapted=parallel_adapt(work,opt,adapt_tick(step,len(work))) or {}
+        if progress and progress.wasCanceled(): return results
+    return mecanizar_finish(doc,work,adapted,adapt_qt,opt,base,save_retal,progress,make_simulation)
+
+def adapt_tick(step,nsheets):
+    def atick(done,n,secs):
+        return step("Entradas/salidas y adaptacion a QtPlasmaC de %d chapa(s) en %d nucleos (%d de %d, %.0f s)..."%(
+            nsheets,n,done,n,secs),int(45+45*done/max(n,1)))
+    return atick
+
+def mecanizar_programs(doc,groups,kerf,tool_label,post,adapt_qt,outdir,base,step,pre,pooled):
+    """Phase 2: put each program in its CAM job (no view refresh per sheet: fitting
+    the 3D view of a full sheet cost ~4 s every time). None when cancelled."""
+    total=len(groups)
     work=[]
     for i,(name,sb,parts) in enumerate(groups,1):
         tag=("_chapa%d"%i) if total>1 else ""
-        if step("%s: %d piezas..."%(name,len(parts)),int(35+10*(i-1)/total)): return results
+        if step("%s: %d piezas..."%(name,len(parts)),int(35+10*(i-1)/total)): return None
         raw=os.path.join(outdir,"%s%s_%s.ngc"%(base,tag,post))
         parallel=pooled and i in pre
         if parallel:
@@ -841,7 +859,7 @@ def mecanizar(doc,groups,kerf,tool_label,post,adapt_qt,opt,outdir,base,save_reta
             show_program_in_job(doc,i,name,job,tc,raw)
         else:
             job,tc,ops,model,ntop,th,_=make_job(doc,i,name,sb,parts,kerf,tool_label,post)
-            if step("%s: perfil calculado (%d caras). Postprocesando con %s..."%(name,ntop,post)): return results
+            if step("%s: perfil calculado (%d caras). Postprocesando con %s..."%(name,ntop,post)): return None
             run_post(post,[tc]+ops,raw)
         # The profiles are computed; adding drawings later must not make
         # FreeCAD recompute them again (that doubled the time).
@@ -850,25 +868,21 @@ def mecanizar(doc,groups,kerf,tool_label,post,adapt_qt,opt,outdir,base,save_reta
             except Exception: pass
         res=dict(name=name,raw=raw,parts=len(parts),final=raw)
         res["expected_holes"]=sum(len([f for f in p.Shape.Faces if f.normalAt(0,0).z>0.99][0].Wires)-1 for p in parts)
-        w=dict(i=i,name=name,sb=sb,parts=parts,job=job,th=th,res=res,tag=tag,
+        w=dict(i=i,key="%s_%d"%(doc.Name,i),name=name,sb=sb,parts=parts,job=job,th=th,res=res,tag=tag,
                dst=os.path.join(outdir,"%s%s_QtPlasmaC.ngc"%(base,tag)),
                title="%s %.0f x %.0f mm"%(name,sb.XLength,sb.YLength))
         if adapt_qt:
             w["faces"]=[f for f in model.Shape.Faces if f.normalAt(0,0).z<-0.99]
         work.append(w)
-    # Phase 3: lead-ins/outs and QtPlasmaC, every sheet at the same time in
-    # background FreeCAD processes (one sheet each); in this FreeCAD as fallback.
-    adapted={}
-    if adapt_qt and len(work)>=2 and worker_exe():
-        def atick(done,n,secs):
-            return step("Entradas/salidas y adaptacion a QtPlasmaC de %d chapa(s) en %d nucleos (%d de %d, %.0f s)..."%(
-                len(work),n,done,n,secs),int(45+45*done/max(n,1)))
-        adapted=parallel_adapt(work,opt,atick) or {}
-        if progress and progress.wasCanceled(): return results
+    return work
+
+def mecanizar_finish(doc,work,adapted,adapt_qt,opt,base,save_retal,progress,make_simulation):
+    """Phase 4: G-code and pierce objects, report data, offcut and file list."""
+    step=stepper(doc,progress); results=[]; total=len(work)
     for w in work:
         i,name,sb,parts,job,th,res=w["i"],w["name"],w["sb"],w["parts"],w["job"],w["th"],w["res"]
         if adapt_qt:
-            r=adapted.get(i)
+            r=adapted.get(w["key"])
             if r is None:
                 def tick(n,N):
                     if progress:
@@ -937,12 +951,12 @@ def parallel_adapt(work,opt,tick=None,workers=WORKERS):
     procs=[]
     try:
         jobs=[]
-        for w in work:
-            fb=os.path.join(tmp,"caras_%d.brep"%w["i"]); Part.makeCompound(w["faces"]).exportBrep(fb)
+        for n_,w in enumerate(work):
+            fb=os.path.join(tmp,"caras_%d.brep"%n_); Part.makeCompound(w["faces"]).exportBrep(fb)
             b=w["sb"]
-            jobs.append(dict(i=w["i"],raw=w["res"]["raw"],dst=w["dst"],faces=fb,title=w["title"],
+            jobs.append(dict(key=w["key"],raw=w["res"]["raw"],dst=w["dst"],faces=fb,title=w["title"],
                              sheet=[b.XMin,b.YMin,b.ZMin,b.XMax,b.YMax,b.ZMax],
-                             wires=os.path.join(tmp,"cortes_%d.brep"%w["i"]),out=os.path.join(tmp,"datos_%d.json"%w["i"]),
+                             wires=os.path.join(tmp,"cortes_%d.brep"%n_),out=os.path.join(tmp,"datos_%d.json"%n_),
                              size=len(w["faces"])))
         n=min(workers,len(jobs)); bins=[[] for _ in range(n)]; load=[0]*n
         for j in sorted(jobs,key=lambda j:-j["size"]):
@@ -970,7 +984,7 @@ def parallel_adapt(work,opt,tick=None,workers=WORKERS):
             r=json.load(open(j["out"])); sh=Part.Shape(); sh.importBrep(j["wires"])
             r["shape"]=sh; r["piers"]=[tuple(p) for p in r["piers"]]
             r["text"]=open(j["dst"]).read()
-            out[j["i"]]=r
+            out[j["key"]]=r
         log("Entradas/salidas de %d chapa(s) calculadas en %d procesos en %.0f s"%(len(jobs),len(procs),time.time()-t0))
         return out
     finally:
@@ -1085,13 +1099,36 @@ def main():
             if prog.wasCanceled(): targets=[]
         else:
             prepared={k:(v,True) for k,v in prepared.items()}
+    adapt_qt=dlg.qt.isChecked() and dlg.qt.isEnabled()
+    save_retal=dlg.retal.isChecked() and dlg.retal.isEnabled()
+    make_simulation=dlg.sim.isChecked() and dlg.qt.isChecked()
+    # Several documents already prepared: the lead-ins/outs of every sheet of
+    # every document also go in ONE round of background processes.
+    pooled_finish={}
+    if prepared and len(targets)>1 and not prog.wasCanceled():
+        works={}
+        for d,groups in targets:
+            activate_doc(d)
+            w=mecanizar_programs(d,groups,kerf,tool,post,adapt_qt,outdir,dbases[d.Name],stepper(d,prog),*prepared[d.Name])
+            if w is None: break
+            works[d.Name]=w
+        if len(works)==len(targets) and not prog.wasCanceled():
+            allw=[w for d,g in targets for w in works[d.Name]]
+            adapted={}
+            if adapt_qt and len(allw)>=2:
+                adapted=parallel_adapt(allw,opt,adapt_tick(stepper(targets[0][0],prog),len(allw))) or {}
+            pooled_finish={k:(v,adapted) for k,v in works.items()}
     for n_doc,(d,groups) in enumerate(targets,1):
         if prog.wasCanceled(): break
         activate_doc(d)
         prog.setWindowTitle("%s - %s (%d de %d)"%(TITLE,d.Label,n_doc,len(targets)))
         if d.Name not in prepared: clean(d)
         dbase=dbases[d.Name]
-        part=mecanizar(d,groups,dlg.kerf.value(),dlg.tool.currentText(),dlg.post.currentText(),dlg.qt.isChecked() and dlg.qt.isEnabled(),opt,outdir,dbase,dlg.retal.isChecked() and dlg.retal.isEnabled(),prog,dlg.sim.isChecked() and dlg.qt.isChecked(),prepared.get(d.Name))
+        if d.Name in pooled_finish:
+            w,adapted=pooled_finish[d.Name]
+            part=mecanizar_finish(d,w,adapted,adapt_qt,opt,dbase,save_retal,prog,make_simulation)
+        else:
+            part=mecanizar(d,groups,kerf,tool,post,adapt_qt,opt,outdir,dbase,save_retal,prog,make_simulation,prepared.get(d.Name))
         for r in part:
             if len(targets)>1: r["name"]="%s · %s"%(d.Label,r["name"])
         res+=part
