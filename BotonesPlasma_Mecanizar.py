@@ -906,10 +906,7 @@ def mecanizar(doc,groups,kerf,tool_label,post,adapt_qt,opt,outdir,base,save_reta
             job.PlasmaFiles=sorted(set(files))
         except Exception: pass
         results.append(res)
-    try:
-        v=Gui.getDocument(doc.Name).activeView(); v.viewTop(); v.fitAll()
-    except Exception: pass
-    return results
+    return results   # the view is fitted once per document by main()
 
 ADAPT_SCRIPT=r'''
 import sys, json, traceback
