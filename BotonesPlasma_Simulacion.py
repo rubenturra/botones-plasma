@@ -28,6 +28,30 @@ def program_objects(doc):
     return sorted(out, key=lambda x: x[0].Name)
 
 
+def frame_sheet(view, box, margin=1.08):
+    """Top view centred on the simulated sheet. fitAll() walks every object of
+    the document (thousands of parts and CAM jobs) and took ~4.5 s."""
+    view.viewTop()
+    try:
+        from pivy import coin
+        cam = view.getCameraNode()
+        size = view.getSize()
+        aspect = float(size[0]) / max(1.0, float(size[1]))
+        w, h = box.XLength * margin, box.YLength * margin
+        c = box.Center
+        if isinstance(cam, coin.SoOrthographicCamera):
+            cam.height.setValue(max(h, w / aspect))
+        else:
+            import math
+            dist = max(h, w / aspect) / 2.0 / math.tan(cam.heightAngle.getValue() / 2.0)
+            cam.position.setValue(c.x, c.y, box.ZMax + dist)
+        if isinstance(cam, coin.SoOrthographicCamera):
+            cam.position.setValue(c.x, c.y, box.ZMax + 1000.0)
+        cam.focalDistance.setValue(1000.0)
+    except Exception:
+        view.fitAll()
+
+
 _path_cache = {}
 
 
@@ -118,7 +142,7 @@ class Simulation(QtWidgets.QDialog):
         except Exception:
             pass
         try:
-            v = Gui.getDocument(doc.Name).activeView(); v.viewTop(); v.fitAll()
+            frame_sheet(Gui.getDocument(doc.Name).activeView(), gcode.Shape.BoundBox)
         except Exception:
             pass
         self._refresh_programs()
