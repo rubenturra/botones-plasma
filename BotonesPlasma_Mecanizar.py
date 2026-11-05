@@ -1119,11 +1119,15 @@ def activate_doc(doc):
 
 _progress=[]
 
-def main(auto_docs=None,intro=""):
+def _hms(sec):
+    sec=int(round(sec))
+    return "%d s"%sec if sec<60 else "%d min %02d s"%(sec//60,sec%60)
+
+def main(auto_docs=None,intro="",started=None):
     """Mecanizar plasma. If anything fails the progress window is always closed
     (left open it blocked FreeCAD) and the error is shown."""
     try:
-        return _main(auto_docs,intro)
+        return _main(auto_docs,intro,started)
     except Exception:
         import traceback
         err=traceback.format_exc(); App.Console.PrintError(err)
@@ -1135,7 +1139,7 @@ def main(auto_docs=None,intro=""):
     finally:
         del _progress[:]
 
-def _main(auto_docs=None,intro=""):
+def _main(auto_docs=None,intro="",started=None):
     """auto_docs: machine these nesting results with the options saved last
     time, without showing the window (button "Hacer todo"). intro: text put
     before the final summary."""
@@ -1252,7 +1256,12 @@ def _main(auto_docs=None,intro=""):
         else: t="%s\n   Programa (sin adaptar): %s"%(r["name"],r["final"])
         if "retal" in r: t+="\n   Retal: %s"%(("%s (%s)"%(r["retal"],r["retal_info"])) if r["retal"] else r["retal_info"])
         lines.append(t)
-    msg=(intro+"\n\n" if intro else "")+"Mecanizado terminado en %.0f s.\n\n"%(time.time()-t0)+"\n\n".join(lines)
+    mach=time.time()-t0
+    head=""
+    if started:   # "Hacer todo": total time first, then the nesting summary
+        total=time.time()-started
+        head="HACER TODO TERMINADO EN %s (anidado %s + mecanizado %s)\n\n"%(_hms(total),_hms(total-mach),_hms(mach))
+    msg=head+(intro+"\n\n" if intro else "")+"Mecanizado terminado en %s.\n\n"%_hms(mach)+"\n\n".join(lines)
     if any("worst" in r and r["worst"]<PIERCE_WARNING for r in res): msg+="\n\nATENCION: hay perforaciones a menos de %.1f mm de una pieza. Aumenta la separacion del anidado."%PIERCE_WARNING
     if not ok: msg+="\n\nAlgo no cuadra: revisa el programa antes de cortar."
     msg+="\n\nAntes de cortar: elige el material en QtPlasmaC y haz una pasada en vacio."
