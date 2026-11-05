@@ -1159,11 +1159,32 @@ def start_reports(res,settings):
         log("No se han podido crear los informes PDF: %s"%e)
     return []
 
+# Paragraphs of the summary that are errors or warnings (by their first line):
+# pieces not nested, programs to review, close pierces, things that failed...
+REPORT_ERROR=re.compile(r"no se han? (anidado|podido|mecanizado|creado|guardado)|sin anidar|siguen en rojo|"
+                        r"^REVISAR\b|ATENCI[OÓ]N|Algo no cuadra|\bAVISO\b|\bERROR\b|fallid|no cuadra",re.I)
+
+def report_html(msg):
+    """The summary as HTML: errors and warnings in bold red, from the line that
+    reports them to the end of its paragraph (where the affected parts are listed)."""
+    import html
+    out=[]
+    for par in msg.split("\n\n"):
+        red=False; rows=[]
+        for line in par.split("\n"):
+            # "OK ..." lines of a sheet are never errors, whatever they mention.
+            red=red or (bool(REPORT_ERROR.search(line)) and not line.lstrip().startswith("OK "))
+            text=html.escape(line)
+            rows.append('<span style="color:#d00000;font-weight:bold;">%s</span>'%text if red else text)
+        out.append('<p style="white-space:pre-wrap;margin:0 0 10px 0;">%s</p>'%"<br>".join(rows))
+    return "".join(out)
+
 def show_report(msg):
-    """Final summary with a scroll bar (a message box grew taller than the screen)."""
+    """Final summary with a scroll bar (a message box grew taller than the screen);
+    errors and warnings in red."""
     d=QtWidgets.QDialog(Gui.getMainWindow()); d.setWindowTitle(TITLE)
     L=QtWidgets.QVBoxLayout(d)
-    t=QtWidgets.QPlainTextEdit(); t.setReadOnly(True); t.setPlainText(msg)
+    t=QtWidgets.QTextEdit(); t.setReadOnly(True); t.setHtml(report_html(msg))
     f=t.font(); f.setPointSize(max(f.pointSize(),10)); t.setFont(f)
     L.addWidget(t)
     bb=QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok); bb.accepted.connect(d.accept); L.addWidget(bb)
