@@ -56,25 +56,37 @@ def frame_sheet(view, box, margin=1.15):
 _path_cache = {}
 
 
+def marking_object(gcode):
+    """Objeto "Marcado ..." de la misma chapa (lineas de pliegue que se marcan antes de cortar)."""
+    try:
+        return gcode.Document.getObject("Plasma_Marcado_" + gcode.Name[len("Plasma_GCode_"):])
+    except Exception:
+        return None
+
+
 def cached_path(gcode, z):
-    """build_path of a G-code object, remembered while the object is unchanged
-    (reopening the window or switching program is then immediate)."""
+    """build_path of a G-code object (marking first, then cuts), remembered while
+    the objects are unchanged (reopening the window or switching program is then immediate)."""
     shape = gcode.Shape
     b = shape.BoundBox
+    mk = marking_object(gcode)
+    marks = mk.Shape.Wires if mk is not None and hasattr(mk, "Shape") else []
     key = (gcode.Document.Name, gcode.Name, len(shape.Edges), round(b.XMin, 3), round(b.YMin, 3),
-           round(b.XMax, 3), round(b.YMax, 3), round(shape.Length, 3), round(z, 3))
+           round(b.XMax, 3), round(b.YMax, 3), round(shape.Length, 3), round(z, 3),
+           len(marks), round(sum(w.Length for w in marks), 3))
     if key not in _path_cache:
         if len(_path_cache) > 40:
             _path_cache.clear()
         deflection = 0.05     # smooth circles even when zooming in (the program uses true arcs)
-        _path_cache[key] = build_path(shape.Wires, z, deflection)
+        _path_cache[key] = build_path(list(marks) + list(shape.Wires), z, deflection, nmarks=len(marks))
     return _path_cache[key]
 
 
-def build_path(wires, z, deflection=0.2):
-    """Cut polylines in cut order and the rapid moves between them."""
-    cuts = []
-    for w in wires:
+def build_path(wires, z, deflection=0.2, nmarks=0):
+    """Cut polylines in cut order and the rapid moves between them; the first
+    nmarks wires are marking lines (kind "mark"), done before any cut."""
+    cuts = []; kinds = []
+    for k_, w in enumerate(wires):
         pts = []
         for e in w.OrderedEdges if hasattr(w, "OrderedEdges") else w.Edges:
             seg = e.discretize(Deflection=deflection) if e.Curve.TypeId != "Part::GeomLine" else [e.Vertexes[0].Point, e.Vertexes[-1].Point]
@@ -82,19 +94,19 @@ def build_path(wires, z, deflection=0.2):
                 seg = list(reversed(seg))
             pts += seg if not pts else seg[1:]
         if len(pts) >= 2:
-            cuts.append([(p.x, p.y, z) for p in pts])
+            cuts.append([(p.x, p.y, z) for p in pts]); kinds.append("mark" if k_ < nmarks else "cut")
     # timeline: rapid to start, then the cut
     steps = []  # (kind, points, length)
     pos = (0.0, 0.0, z)
-    for c in cuts:
+    for c, kd in zip(cuts, kinds):
         steps.append(("rapid", [pos, c[0]], math.dist(pos, c[0])))
         length = sum(math.dist(c[i], c[i + 1]) for i in range(len(c) - 1))
-        steps.append(("cut", c, length))
+        steps.append((kd, c, length))
         pos = c[-1]
     steps.append(("rapid", [pos, (0.0, 0.0, z)], math.dist(pos, (0.0, 0.0, z))))
     t = 0.0
     for k, (kind, pts, length) in enumerate(steps):
-        dur = length / (CUT_SPEED if kind == "cut" else RAPID_SPEED)
+        dur = length / (CUT_SPEED if kind in ("cut", "mark") else RAPID_SPEED)
         steps[k] = dict(kind=kind, pts=pts, length=length, t0=t, t1=t + dur)
         t += dur
     return steps, t
@@ -124,30 +136,42 @@ class Simulation(QtWidgets.QDialog):
             self.toggle()
         self._remove_scene()
         if self.gcode is not None:
-            try:
-                self.gcode.ViewObject.Visibility = True
-            except Exception:
-                pass
+            self._show_static(True)
         self.doc, self.gcode = doc, gcode
         bb = gcode.Shape.BoundBox
         self.z = bb.ZMax + 0.5
+        mk = marking_object(gcode)
+        try:
+            # above the parts' top faces, so the marks drawn on them stay visible
+            zs = [bb.ZMax] + ([mk.Shape.BoundBox.ZMax] if mk is not None else []) + \
+                 [o.Shape.BoundBox.ZMax for o in doc.Objects if o.Name.startswith("Nesting_") and hasattr(o, "Shape") and not o.Shape.isNull()]
+            self.z = max(zs) + 0.5
+        except Exception:
+            pass
         self.steps, self.total = cached_path(gcode, self.z)
         self.ncuts = sum(1 for s in self.steps if s["kind"] == "cut")
+        self.nmarks = sum(1 for s in self.steps if s["kind"] == "mark")
         self._cut_full = [len(s["pts"]) for s in self.steps if s["kind"] == "cut"]
-        self._rap_full = [len(s["pts"]) for s in self.steps if s["kind"] != "cut"]
+        self._mark_full = [len(s["pts"]) for s in self.steps if s["kind"] == "mark"]
+        self._rap_full = [len(s["pts"]) for s in self.steps if s["kind"] == "rapid"]
         self._kind = None
         _bring_to_front(doc)
         self._build_scene()
-        try:
-            gcode.ViewObject.Visibility = False
-        except Exception:
-            pass
+        self._show_static(False)
         try:
             frame_sheet(Gui.getDocument(doc.Name).activeView(), gcode.Shape.BoundBox)
         except Exception:
             pass
         self._refresh_programs()
         self._show(0.0)
+
+    def _show_static(self, visible):
+        """Show/hide the static G-code and marking drawings while simulating."""
+        for o in (self.gcode, marking_object(self.gcode)):
+            try:
+                o.ViewObject.Visibility = visible
+            except Exception:
+                pass
 
     # ---------------------------------------------------------------- scene
     def _build_scene(self):
@@ -169,6 +193,13 @@ class Simulation(QtWidgets.QDialog):
         self.rap_coords = coin.SoCoordinate3(); self.rap_lines = coin.SoLineSet()
         for n in (mat2, style2, self.rap_coords, self.rap_lines):
             self.rap_sep.addChild(n)
+        # marks done (orange, thick)
+        self.mark_sep = coin.SoSeparator()
+        mat4 = coin.SoMaterial(); mat4.diffuseColor.setValue(1.0, 0.5, 0.0); mat4.emissiveColor.setValue(0.8, 0.35, 0.0)
+        style4 = coin.SoDrawStyle(); style4.lineWidth = 3.0
+        self.mark_coords = coin.SoCoordinate3(); self.mark_lines = coin.SoLineSet()
+        for n in (mat4, style4, self.mark_coords, self.mark_lines):
+            self.mark_sep.addChild(n)
         # torch
         self.torch_sep = coin.SoSeparator()
         self.torch_pos = coin.SoTranslation()
@@ -181,12 +212,14 @@ class Simulation(QtWidgets.QDialog):
         lift = coin.SoTranslation(); lift.translation.setValue(0, 0, 1.5 * r)
         for n in (self.torch_pos, mat3, lift, rot, cone):
             self.torch_sep.addChild(n)
-        for n in (self.cut_sep, self.rap_sep, self.torch_sep):
+        for n in (self.mark_sep, self.cut_sep, self.rap_sep, self.torch_sep):
             self.root.addChild(n)
         # static coordinates; only the number of drawn vertices changes per frame
-        cut_pts, rap_pts = [], []
+        cut_pts, rap_pts, mark_pts = [], [], []
         for s in self.steps:
-            (cut_pts if s["kind"] == "cut" else rap_pts).extend(s["pts"])
+            {"cut": cut_pts, "mark": mark_pts}.get(s["kind"], rap_pts).extend(s["pts"])
+        if mark_pts:
+            self.mark_coords.point.setValues(0, len(mark_pts), mark_pts)
         if cut_pts:
             self.cut_coords.point.setValues(0, len(cut_pts), cut_pts)
         if rap_pts:
@@ -245,7 +278,8 @@ class Simulation(QtWidgets.QDialog):
         self.pdf_check.setChecked(App.ParamGet(PREFS).GetBool("SimShowPdf", False))
         self.pdf_check.toggled.connect(lambda v: App.ParamGet(PREFS).SetBool("SimShowPdf", bool(v)))
         L.addWidget(self.pdf_check)
-        note = QtWidgets.QLabel("Antorcha azul: cortando · antorcha verde: en vacío · rojo: cortes hechos · "
+        note = QtWidgets.QLabel("Antorcha naranja: marcando · antorcha azul: cortando · antorcha verde: en vacío · "
+                                "naranja: marcados hechos (primero) · rojo: cortes hechos · "
                                 "verde discontinuo: movimientos en vacío · "
                                 "tiempo calculado con 2000 mm/min de corte (en la máquina manda QtPlasmaC).")
         note.setWordWrap(True); note.setStyleSheet("color: gray;")
@@ -294,9 +328,9 @@ class Simulation(QtWidgets.QDialog):
 
     def _show(self, t):
         self.t = t
-        cut_counts, rap_counts = [], []
+        cut_counts, rap_counts, mark_counts = [], [], []
         torch = (0.0, 0.0, self.z)
-        done_cuts = 0
+        done_cuts = 0; done_marks = 0
         kind = "rapid"
         for s in self.steps:
             if s["t0"] < t < s["t1"]:
@@ -307,6 +341,8 @@ class Simulation(QtWidgets.QDialog):
                 torch = pts[-1]
                 if s["kind"] == "cut":
                     done_cuts += 1
+                elif s["kind"] == "mark":
+                    done_marks += 1
             elif t <= s["t0"]:
                 n = 0
             else:
@@ -322,7 +358,8 @@ class Simulation(QtWidgets.QDialog):
                         n = i + 1
                         break
                     acc += d; n = i + 2
-            (cut_counts if s["kind"] == "cut" else rap_counts).append(n)
+            {"cut": cut_counts, "mark": mark_counts}.get(s["kind"], rap_counts).append(n)
+        self._fix_partial(self.mark_lines, mark_counts, self._mark_full)
         self._fix_partial(self.cut_lines, cut_counts, self._cut_full)
         self._fix_partial(self.rap_lines, rap_counts, self._rap_full)
         self.torch_pos.translation.setValue(*torch)
@@ -330,10 +367,13 @@ class Simulation(QtWidgets.QDialog):
             self._kind = kind
             if kind == "cut":
                 self.torch_mat.diffuseColor.setValue(0.05, 0.35, 1.0); self.torch_mat.emissiveColor.setValue(0.0, 0.2, 0.9)
+            elif kind == "mark":
+                self.torch_mat.diffuseColor.setValue(1.0, 0.5, 0.0); self.torch_mat.emissiveColor.setValue(0.8, 0.35, 0.0)
             else:
                 self.torch_mat.diffuseColor.setValue(0.1, 0.9, 0.2); self.torch_mat.emissiveColor.setValue(0.0, 0.6, 0.1)
         self.slider.blockSignals(True); self.slider.setValue(int(1000 * t / max(self.total, 1e-9))); self.slider.blockSignals(False)
-        self.info.setText("Corte %d de %d  ·  %s de %s" % (done_cuts, self.ncuts, _mmss(t), _mmss(self.total)))
+        marks = ("Marcado %d de %d  ·  " % (done_marks, self.nmarks)) if self.nmarks else ""
+        self.info.setText("%sCorte %d de %d  ·  %s de %s" % (marks, done_cuts, self.ncuts, _mmss(t), _mmss(self.total)))
 
     @staticmethod
     def _fix_partial(lineset, counts, full):
@@ -364,10 +404,7 @@ class Simulation(QtWidgets.QDialog):
         self._remove_scene()
         if self in _open:
             _open.remove(self)
-        try:
-            self.gcode.ViewObject.Visibility = True
-        except Exception:
-            pass
+        self._show_static(True)
         super().closeEvent(event)
         if show_pdf:
             import BotonesPlasma_VisorPDF as V

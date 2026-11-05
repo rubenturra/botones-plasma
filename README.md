@@ -27,6 +27,22 @@ carpeta de la *Biblioteca de retales* de 1st Nesting (si no hay, en
 
 Antes de cortar: elige el material en QtPlasmaC y haz una pasada en vacío.
 
+### Marcado (líneas de pliegue)
+
+Las **líneas sueltas** de una pieza (aristas que no son de ninguna cara, por
+ejemplo las líneas de pliegue de un desplegado de chapa metálica guardadas como
+compuesto *sólido + líneas*) se **marcan con plasma antes de cortar**. 1st Nesting
+las lleva con la pieza al anidarla, así que caen en su sitio en la chapa.
+
+- El programa carga el material de marcado (`M190 P<n>` + `M66 P3 L3 Q1`), marca
+  todas las líneas (rectas con `G1`, arcos con `G2`/`G3`) y vuelve al material de
+  corte antes del primer corte.
+- Cada recta se acorta un poco por cada extremo para no morder el canto.
+- En la vista y en la **simulación** el marcado sale en naranja, antes de los cortes.
+- Preferencias (`BaseApp/Preferences/Macros/MecanizarPlasma`):
+  `MaterialMarcado` (90 por defecto), `MaterialCorte` (1) y `MarcadoRecorte` (2 mm).
+  Pon los números de tu tabla de materiales de QtPlasmaC.
+
 ## Instalación
 
 1. *Herramientas → Addon Manager → ⚙ Configuración → Repositorios personalizados*:

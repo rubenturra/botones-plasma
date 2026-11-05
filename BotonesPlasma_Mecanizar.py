@@ -321,6 +321,87 @@ def adapt(raw,dst,faces,sheet,opt,title,tick):
     open(dst,"w",newline="\n").write("\n".join(out)+"\n")
     return dict(holes=sum(inner),outer=len(conts)-sum(inner),worst=worst,short=short,wires=wires,piers=piers,text="\n".join(out))
 
+# ------------------------------------------------------------------ marcado
+# Las lineas sueltas de una pieza (aristas que no son de ninguna cara, p. ej.
+# las lineas de pliegue de un desplegado de chapa) se MARCAN con plasma antes
+# de cortar: QtPlasmaC carga el material de marcado (poca intensidad), marca
+# todas las lineas y vuelve al material de corte.
+#   Preferencias (MecanizarPlasma): MaterialMarcado, MaterialCorte, MarcadoRecorte
+def marking_settings():
+    P=App.ParamGet(PREFS)
+    return dict(mark=P.GetInt("MaterialMarcado",90),cut=P.GetInt("MaterialCorte",1),trim=P.GetFloat("MarcadoRecorte",2.0))
+
+def marking_edges(parts):
+    """Aristas sueltas (no de caras) de las piezas, ya colocadas en la chapa."""
+    out=[]
+    def walk(sh):
+        if sh.ShapeType=="Compound":
+            for c in sh.SubShapes: walk(c)
+        elif sh.ShapeType in ("Edge","Wire"):
+            out.extend(sh.Edges)
+    for p in parts: walk(p.Shape)
+    return out
+
+def _mark_paths(edges,trim):
+    """Cada linea como lista de (g,s,e,i,j) en XY; las rectas se acortan 'trim' por cada lado."""
+    paths=[]
+    for e in edges:
+        c=e.Curve; t=type(c).__name__
+        a=e.valueAt(e.FirstParameter); b=e.valueAt(e.LastParameter)
+        if t in ("Line","LineSegment"):
+            L=a.distanceToPoint(b)
+            if L<0.5: continue
+            k=min(trim,max(0.0,(L-1.0)/2.0))/L
+            s=a+(b-a)*k; f=b+(a-b)*k
+            paths.append([(1,[s.x,s.y],[f.x,f.y],0.0,0.0)])
+        elif t=="Circle" and abs(c.Axis.z)>0.999 and a.distanceToPoint(b)>1e-6:
+            ccw=(c.Axis.z>0)
+            paths.append([(3 if ccw else 2,[a.x,a.y],[b.x,b.y],c.Center.x-a.x,c.Center.y-a.y)])
+        else:
+            pts=e.discretize(Deflection=0.05)
+            paths.append([(1,[pts[n].x,pts[n].y],[pts[n+1].x,pts[n+1].y],0.0,0.0) for n in range(len(pts)-1)])
+    # orden: la siguiente linea mas cercana (las rectas se pueden recorrer al reves)
+    order=[]; pos=[0.0,0.0]; left=list(paths)
+    while left:
+        best=None
+        for n,p in enumerate(left):
+            d=math.dist(pos,p[0][1])
+            if best is None or d<best[0]: best=(d,n,False)
+            if len(p)==1 and p[0][0]==1:
+                d=math.dist(pos,p[0][2])
+                if d<best[0]: best=(d,n,True)
+        d,n,rev=best; p=left.pop(n)
+        if rev: g,s_,e_,i,j=p[0]; p=[(1,e_,s_,0.0,0.0)]
+        order.append(p); pos=p[-1][2]
+    return order
+
+def add_marking(dst,parts,sb):
+    """Mete el marcado al principio del programa QtPlasmaC ya escrito en dst.
+    Devuelve (numero de lineas, cable para dibujar, texto nuevo) o (0,None,None)."""
+    edges=marking_edges(parts)
+    if not edges: return 0,None,None
+    st=marking_settings(); ox,oy=sb.XMin,sb.YMin
+    paths=_mark_paths(edges,st["trim"])
+    if not paths: return 0,None,None
+    blk=["(MARCADO: %d lineas de pliegue - material de marcado QtPlasmaC n %d)"%(len(paths),st["mark"]),
+         "M190 P%d"%st["mark"],"M66 P3 L3 Q1","F#<_hal[plasmac.cut-feed-rate]>"]
+    wires=[]
+    for p in paths:
+        blk+=["G0 X%s Y%s"%(fmt(p[0][1][0]-ox),fmt(p[0][1][1]-oy)),"M3 $0 S1"]
+        for g,s_,e_,i,j in p:
+            blk.append("G%d X%s Y%s"%(g,fmt(e_[0]-ox),fmt(e_[1]-oy))+("" if g==1 else " I%s J%s"%(fmt(i),fmt(j))))
+        blk.append("M5 $0")
+        wires.append(Part.Wire([edge(x) for x in p]))
+    blk+=["(CORTE - material de corte QtPlasmaC n %d)"%st["cut"],"M190 P%d"%st["cut"],"M66 P3 L3 Q1"]
+    lines=open(dst).read().splitlines()
+    k=next((n for n,l in enumerate(lines) if l.startswith("F#<_hal[plasmac.cut-feed-rate]>")),None)
+    if k is None: return 0,None,None
+    lines[k:k]=blk
+    lines.insert(1,"(Marcado de pliegues: %d lineas antes del corte, material %d; corte con material %d)"%(len(paths),st["mark"],st["cut"]))
+    txt="\n".join(lines)+"\n"
+    open(dst,"w",newline="\n").write(txt)
+    return len(paths),Part.makeCompound(wires),txt
+
 # ------------------------------------------------------------------ CAM
 # FreeCAD processes that compute the CAM profiles in parallel: every core but
 # one (FreeCAD itself keeps working meanwhile).
@@ -954,12 +1035,21 @@ def mecanizar_finish(doc,work,adapted,adapt_qt,opt,base,save_retal,progress,make
             except Exception: pass
             pp=doc.addObject("Part::Feature","Plasma_Perforaciones_%d"%i); pp.Label="Perforaciones %s"%name
             pp.Shape=Part.makeCompound([Part.Vertex(App.Vector(x,y,0)) for x,y in r["piers"]]); pp.ViewObject.PointColor=(1.0,0.0,0.0); pp.ViewObject.PointSize=6
-            txt=r["text"]
+            txt=r["text"]; nmarks=0
+            try:
+                nmarks,mw,mtxt=add_marking(w["dst"],parts,sb)
+            except Exception as ex:
+                log("%s: no se ha podido anadir el marcado: %s"%(name,ex)); nmarks=0
+            if nmarks:
+                txt=mtxt
+                mk=doc.addObject("Part::Feature","Plasma_Marcado_%d"%i); mk.Label="Marcado %s (%d lineas)"%(name,nmarks); mk.Shape=mw
+                mk.ViewObject.LineColor=(1.0,0.45,0.0); mk.ViewObject.LineWidth=3; mk.purgeTouched()
+                log("%s: %d lineas de marcado anadidas al principio del programa"%(name,nmarks))
             # Data for the PDF report (drawn in the background at the end).
             res["_report"]=dict(doc=doc,index=i,name=name,sb=sb,parts=parts,piers=r["piers"],
                                 cut_length=r["shape"].Length,offcut=find_offcut(doc,sb))
-            res.update(final=w["dst"],holes=r["holes"],outer=r["outer"],worst=r["worst"],short=r["short"],
-                       m3=txt.count("M3 $0 S1"),m5=txt.count("M5 $0"),z=len(re.findall(r"\bZ-?\d",txt)))
+            res.update(final=w["dst"],holes=r["holes"],outer=r["outer"],worst=r["worst"],short=r["short"],marks=nmarks,
+                       m3=txt.count("M3 $0 S1")-nmarks,m5=txt.count("M5 $0")-nmarks,z=len(re.findall(r"\bZ-?\d",txt)))
             for o in (g,pp): o.purgeTouched()
             if make_simulation:
                 # The plasma simulation window plays the G-code object above; the
