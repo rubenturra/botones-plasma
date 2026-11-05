@@ -28,7 +28,7 @@ def program_objects(doc):
     return sorted(out, key=lambda x: x[0].Name)
 
 
-def frame_sheet(view, box, margin=1.08):
+def frame_sheet(view, box, margin=1.15):
     """Top view centred on the simulated sheet. fitAll() walks every object of
     the document (thousands of parts and CAM jobs) and took ~4.5 s."""
     view.viewTop()
