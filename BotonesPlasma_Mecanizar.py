@@ -5,7 +5,7 @@
 #    para exteriores e interiores, guardar retal para 1st Nesting, carpeta
 #  - Por chapa: trabajo CAM, material, herramienta, Perfil, postprocesado, adaptacion
 #    QtPlasmaC (agujeros primero), dibujo del G-code final, comprobacion y guardado
-import FreeCAD as App, FreeCADGui as Gui, Part, os, re, math, importlib, time
+import FreeCAD as App, FreeCADGui as Gui, Part, os, re, math, importlib, time, json
 from PySide import QtWidgets, QtCore
 
 TITLE="Mecanizar plasma"
@@ -319,7 +319,9 @@ def adapt(raw,dst,faces,sheet,opt,title,tick):
     return dict(holes=sum(inner),outer=len(conts)-sum(inner),worst=worst,short=short,wires=wires,piers=piers,text="\n".join(out))
 
 # ------------------------------------------------------------------ CAM
-WORKERS=4  # FreeCAD processes used to compute the CAM profiles in parallel
+# FreeCAD processes that compute the CAM profiles in parallel: every core but
+# one (FreeCAD itself keeps working meanwhile).
+WORKERS=max(2,min(12,(os.cpu_count() or 4)-1))
 
 WORKER_SCRIPT=r'''
 import FreeCAD as App, Part, importlib, json, traceback
@@ -432,17 +434,20 @@ def make_job(doc,i,name,sb,parts,kerf,tool_label,post,with_ops=True):
     model=job.Model.Group[0]
     # Top faces: flat at zmax (bounding box test first; CenterOfMass on every
     # face of hundreds of parts took ~10 s).
+    # model.Shape.Faces builds the list of EVERY face each time it is read:
+    # read it once (reading it per part cost 9 s on a 210-part sheet).
+    faces=model.Shape.Faces
     top=[]
-    for k,f in enumerate(model.Shape.Faces):
+    for k,f in enumerate(faces):
         b=f.BoundBox
         if b.ZLength<0.01 and abs(b.ZMax-zmax)<0.01 and f.normalAt(0,0).z>0.99: top.append("Face%d"%(k+1))
     # CAM Profile ignores the outline of a face lying inside another face's
     # hole (part-in-part nesting), so every nesting level gets its own profile.
-    levels=nesting_levels(model.Shape.Faces,top)
+    levels=nesting_levels(faces,top)
     ops=[]
     if not with_ops:
         doc.recompute()
-        return job,tc,ops,model,len(top),th,[(levels[n],model.Shape.Faces[int(n[4:])-1]) for n in top]
+        return job,tc,ops,model,len(top),th,[(levels[n],faces[int(n[4:])-1]) for n in top]
     for lv in sorted(set(levels.values())):
         names=[n for n in top if levels[n]==lv]
         op=PathProfile.Create("Plasma_Perfil_%d_%d"%(i,lv), parentJob=job)
@@ -657,6 +662,13 @@ class LeadBox(QtWidgets.QGroupBox):
         self.pos=QtWidgets.QComboBox(); self.pos.addItems(["Lado","Esquina"]); F.addRow("Posicion entrada:",self.pos)
         self.dir=QtWidgets.QComboBox(); self.dir.addItems(["Horario","Antihorario"]); self.dir.setCurrentText(d_dir); F.addRow("Direccion:",self.dir)
     def get(self): return {"in":self.cin.currentText(),"in_len":self.lin.value(),"out":self.cout.currentText(),"out_len":self.lout.value(),"dir":self.dir.currentText(),"pos":self.pos.currentText()}
+    def set(self,v):
+        for c,k in ((self.cin,"in"),(self.cout,"out"),(self.dir,"dir"),(self.pos,"pos")):
+            if k in v and c.findText(str(v[k]))>=0: c.setCurrentText(str(v[k]))
+        for sp,k in ((self.lin,"in_len"),(self.lout,"out_len")):
+            if k in v:
+                try: sp.setValue(float(v[k]))
+                except (TypeError,ValueError): pass
 
 class Dialog(QtWidgets.QDialog):
     def __init__(self,groups,source,doc):
@@ -708,8 +720,29 @@ class Dialog(QtWidgets.QDialog):
         self.name=QtWidgets.QLineEdit(lastname or re.sub(r"[^\w\-]+","_",doc.Label)); F2.addRow("Nombre del programa:",self.name)
         self.preview=QtWidgets.QLabel(); self.preview.setStyleSheet("color:gray"); F2.addRow("",self.preview)
         self.name.textChanged.connect(self._upd_preview); self._upd_preview()
+        self.load_state()
         bb=QtWidgets.QDialogButtonBox(); bb.addButton("Mecanizar",QtWidgets.QDialogButtonBox.AcceptRole); bb.addButton("Cancelar",QtWidgets.QDialogButtonBox.RejectRole)
         bb.accepted.connect(self.accept); bb.rejected.connect(self.reject); L.addWidget(bb)
+    # Every option is remembered for the next time the window opens.
+    def state(self):
+        return dict(tool=self.tool.currentText(),kerf=self.kerf.value(),post=self.post.currentText(),
+                    qt=self.qt.isChecked(),ext=self.ext.get(),int=self.int.get(),retal=self.retal.isChecked(),
+                    sim=self.sim.isChecked(),clean=self.clean.isChecked(),all_docs=self.all_docs.isChecked())
+    def save_state(self):
+        try: App.ParamGet(PREFS).SetString("DialogState",json.dumps(self.state()))
+        except Exception as e: log("No se han podido guardar los ajustes: %s"%e)
+    def load_state(self):
+        try: st=json.loads(App.ParamGet(PREFS).GetString("DialogState","") or "{}")
+        except Exception: st={}
+        if not st: return
+        if st.get("tool"): self.tool.setCurrentText(st["tool"])
+        if "kerf" in st: self.kerf.setValue(float(st["kerf"]))      # after the tool (it sets the kerf from its name)
+        if st.get("post") and self.post.findText(st["post"])>=0: self.post.setCurrentText(st["post"])
+        if "qt" in st and self.qt.isEnabled(): self.qt.setChecked(bool(st["qt"]))
+        if "ext" in st: self.ext.set(st["ext"])
+        if "int" in st: self.int.set(st["int"])
+        for box,k in ((self.retal,"retal"),(self.sim,"sim"),(self.clean,"clean"),(self.all_docs,"all_docs")):
+            if k in st and box.isEnabled(): box.setChecked(bool(st[k]))
     def _show_info(self):
         npz=sum(len(g[2]) for g in self.groups)
         self.info.setText("<b>%d chapa(s), %d piezas</b> (%s)<br>"%(len(self.groups),npz,self.source)+
@@ -840,10 +873,9 @@ def mecanizar(doc,groups,kerf,tool_label,post,adapt_qt,opt,outdir,base,save_reta
             for o in (g,pp): o.recompute()
             QtWidgets.QApplication.processEvents()
             if make_simulation:
-                step("%s: creando la simulacion del programa final..."%name)
-                comp=model.Objects[0] if hasattr(model,"Objects") and model.Objects else doc.getObject("Plasma_Piezas_%d"%i)
-                comp=doc.getObject("Plasma_Piezas_%d"%i) or comp
-                res["sim"]=make_sim(doc,i,name,comp,sb,kerf,txt,comp.Shape.BoundBox.ZMin,comp.Shape.BoundBox.ZMax)
+                # The plasma simulation window plays the G-code object above; the
+                # extra CAM "simulation" job (~3.5 s per sheet) is no longer made.
+                res["sim"]=True
                 job.ViewObject.Visibility=False
         if save_retal:
             step("%s: guardando el retal para 1st Nesting..."%name)
@@ -917,7 +949,9 @@ def main():
     groups,source=detect(doc)
     if not groups: QtWidgets.QMessageBox.warning(None,TITLE,"No encuentro piezas.\nSelecciona las piezas a cortar o abre un resultado de anidado."); return
     dlg=Dialog(groups,source,doc)
-    if dlg.exec_()!=QtWidgets.QDialog.Accepted: return
+    if dlg.exec_()!=QtWidgets.QDialog.Accepted:
+        dlg.save_state(); return
+    dlg.save_state()
     outdir=dlg.folder.text(); os.makedirs(outdir,exist_ok=True)
     App.ParamGet(PREFS).SetString("LastFolder",outdir)
     nm=clean_name(dlg.name.text())
