@@ -22,7 +22,10 @@ def retal_dir():
 
 # ------------------------------------------------------------------ documento
 def detect(doc,use_selection=True):
-    sel=[o for o in Gui.Selection.getSelection() if hasattr(o,"Shape") and o.Shape.Solids] if use_selection else []
+    # Never take the machining's own objects (part compounds, CAM models) as parts.
+    own=("Plasma_","Job_Plasma","Model","Stock","Sheet_","Reusable_","Bridges_")
+    sel=[o for o in Gui.Selection.getSelection() if hasattr(o,"Shape") and o.Shape.Solids
+         and not o.Name.startswith(own) and not any(x.Name.startswith(("Plasma_Job","Job_Plasma")) for x in o.InListRecursive)] if use_selection else []
     sheets=sorted([o for o in doc.Objects if o.Name.startswith("Sheet_") and o.TypeId=="Part::Feature"],key=lambda s:s.Shape.BoundBox.XMin)
     if sel: parts=sel; source="piezas seleccionadas"
     else:
