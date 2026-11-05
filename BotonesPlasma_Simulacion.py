@@ -13,6 +13,7 @@ import FreeCADGui as Gui
 from PySide import QtWidgets, QtCore
 
 TITLE = "Simulacion de corte plasma"
+PREFS = "User parameter:BaseApp/Preferences/Mod/BotonesPlasma"
 CUT_SPEED = 2000.0 / 60.0      # mm/s (la real la pone QtPlasmaC segun el material)
 RAPID_SPEED = 10000.0 / 60.0   # mm/s
 SPEEDS = (("x1 (real)", 1), ("x5", 5), ("x20", 20), ("x100", 100), ("x500", 500))
@@ -239,6 +240,11 @@ class Simulation(QtWidgets.QDialog):
         close.clicked.connect(self.close)
         h.addWidget(close)
         L.addLayout(h)
+        self.pdf_check = QtWidgets.QCheckBox("Al cerrar la simulación, ver el informe PDF de este programa "
+                                             "(en una pestaña de FreeCAD, con todos los informes)")
+        self.pdf_check.setChecked(App.ParamGet(PREFS).GetBool("SimShowPdf", False))
+        self.pdf_check.toggled.connect(lambda v: App.ParamGet(PREFS).SetBool("SimShowPdf", bool(v)))
+        L.addWidget(self.pdf_check)
         note = QtWidgets.QLabel("Antorcha azul: cortando · antorcha verde: en vacío · rojo: cortes hechos · "
                                 "verde discontinuo: movimientos en vacío · "
                                 "tiempo calculado con 2000 mm/min de corte (en la máquina manda QtPlasmaC).")
@@ -347,6 +353,14 @@ class Simulation(QtWidgets.QDialog):
 
     def closeEvent(self, event):
         self.timer.stop()
+        show_pdf = self.pdf_check.isChecked() and not getattr(self, "_quiet", False)
+        pdf = None
+        if show_pdf:
+            try:
+                import BotonesPlasma_VisorPDF as V
+                pdf = V.program_pdf(self.doc, self.gcode)
+            except Exception:
+                pdf = None
         self._remove_scene()
         if self in _open:
             _open.remove(self)
@@ -355,6 +369,9 @@ class Simulation(QtWidgets.QDialog):
         except Exception:
             pass
         super().closeEvent(event)
+        if show_pdf:
+            import BotonesPlasma_VisorPDF as V
+            QtCore.QTimer.singleShot(0, lambda: V.show(pdf))
 
 
 def _mmss(seconds):

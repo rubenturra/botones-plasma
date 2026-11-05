@@ -28,6 +28,23 @@ def density(material):
     return STEEL
 
 
+def preview_dir():
+    try:
+        import FreeCAD as App
+        base = App.getUserAppDataDir()
+    except Exception:
+        base = os.path.expanduser("~")
+    return os.path.join(base, "botones-plasma", "informes")
+
+
+def preview_file(pdf):
+    """Image of the report page, kept in FreeCAD's user folder (the viewer in
+    FreeCAD shows it: this FreeCAD cannot display PDF files itself)."""
+    import hashlib
+    key = os.path.normcase(os.path.abspath(pdf))
+    return os.path.join(preview_dir(), hashlib.sha1(key.encode("utf-8")).hexdigest() + ".png")
+
+
 # ---------------------------------------------------------------- en FreeCAD
 _names_cache = {}
 
@@ -127,6 +144,7 @@ def collect(job_dir, res, settings):
         kerf=settings.get("kerf", 0), tool=settings.get("tool", ""), post=settings.get("post", ""),
         feed=settings.get("feed", 2000.0), leads=settings.get("leads", {}),
         pdf=os.path.splitext(res.get("final") or res.get("raw"))[0] + ".pdf")
+    data["preview"] = preview_file(data["pdf"])
     fn = os.path.join(job_dir, "%s.json" % tag)
     with open(fn, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
@@ -166,6 +184,12 @@ def build_all(job_files, job_dir):
             try:
                 data = json.load(open(fn, encoding="utf-8"))
                 build(data)
+                if data.get("preview"):
+                    # Same drawing as an image, for the viewer inside FreeCAD.
+                    os.makedirs(os.path.dirname(data["preview"]), exist_ok=True)
+                    tmp = os.path.splitext(data["preview"])[0] + "_tmp"
+                    build(data, png_preview=tmp)
+                    os.replace(tmp + "_1.png", data["preview"])
                 log.append("ok " + data["pdf"])
             except Exception:
                 import traceback
