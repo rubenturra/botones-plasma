@@ -1068,15 +1068,19 @@ def activate_doc(doc):
     except Exception: pass
     QtWidgets.QApplication.processEvents()
 
-def main():
-    doc=App.ActiveDocument
+def main(auto_docs=None,intro=""):
+    """auto_docs: machine these nesting results with the options saved last
+    time, without showing the window (button "Hacer todo"). intro: text put
+    before the final summary."""
+    doc=auto_docs[0] if auto_docs else App.ActiveDocument
     if not doc: QtWidgets.QMessageBox.warning(None,TITLE,"Abre primero el proyecto con las piezas."); return
-    groups,source=detect(doc)
+    groups,source=detect(doc,not auto_docs)
     if not groups: QtWidgets.QMessageBox.warning(None,TITLE,"No encuentro piezas.\nSelecciona las piezas a cortar o abre un resultado de anidado."); return
     dlg=Dialog(groups,source,doc)
-    if dlg.exec_()!=QtWidgets.QDialog.Accepted:
-        dlg.save_state(); return
-    dlg.save_state()
+    if not auto_docs:
+        if dlg.exec_()!=QtWidgets.QDialog.Accepted:
+            dlg.save_state(); return
+        dlg.save_state()
     outdir=dlg.folder.text(); os.makedirs(outdir,exist_ok=True)
     App.ParamGet(PREFS).SetString("LastFolder",outdir)
     nm=clean_name(dlg.name.text())
@@ -1090,7 +1094,10 @@ def main():
     t0=time.time()
     # One document, or every open nesting result with the same options.
     targets=[(doc,dlg.groups)]
-    if dlg.all_docs.isChecked():
+    if auto_docs:
+        targets=[(d,dlg.groups if d is doc else detect(d,False)[0]) for d in auto_docs]
+        targets=[(d,g) for d,g in targets if g]
+    elif dlg.all_docs.isChecked():
         targets=[(d,dlg.groups if d is doc else detect(d,False)[0]) for d in nesting_documents()]
     res=[]
     post=dlg.post.currentText(); kerf=dlg.kerf.value(); tool=dlg.tool.currentText()
@@ -1171,7 +1178,7 @@ def main():
         else: t="%s\n   Programa (sin adaptar): %s"%(r["name"],r["final"])
         if "retal" in r: t+="\n   Retal: %s"%(("%s (%s)"%(r["retal"],r["retal_info"])) if r["retal"] else r["retal_info"])
         lines.append(t)
-    msg="Terminado en %.0f s.\n\n"%(time.time()-t0)+"\n\n".join(lines)
+    msg=(intro+"\n\n" if intro else "")+"Mecanizado terminado en %.0f s.\n\n"%(time.time()-t0)+"\n\n".join(lines)
     if any("worst" in r and r["worst"]<PIERCE_WARNING for r in res): msg+="\n\nATENCION: hay perforaciones a menos de %.1f mm de una pieza. Aumenta la separacion del anidado."%PIERCE_WARNING
     if not ok: msg+="\n\nAlgo no cuadra: revisa el programa antes de cortar."
     msg+="\n\nAntes de cortar: elige el material en QtPlasmaC y haz una pasada en vacio."
