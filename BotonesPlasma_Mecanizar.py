@@ -463,23 +463,23 @@ def make_job(doc,i,name,sb,parts,kerf,tool_label,post,with_ops=True):
 def nesting_levels(faces,names):
     """Level of each top face: how many other faces' holes contain it."""
     f={n:faces[int(n[4:])-1] for n in names}
-    holes=[]
+    holes=[]   # (owner, hole face, its box, z) computed once
     for n,face in f.items():
         for w in face.Wires:
             if not w.isSame(face.OuterWire):
-                try: holes.append((n,Part.Face(w)))
+                try:
+                    hf=Part.Face(w); holes.append((n,hf,hf.BoundBox,hf.BoundBox.Center.z))
                 except Exception: pass
     level={}
     for n,face in f.items():
-        c=face.OuterWire.BoundBox.Center; pt=App.Vector(c.x,c.y,face.CenterOfMass.z)
-        probe=face.Vertexes[0].Point if not face.isInside(pt,0.01,True) else pt
+        fb=face.BoundBox
+        cand=[(o,hf,z) for o,hf,hb,z in holes if o!=n and hb.XMin<=fb.XMin and hb.YMin<=fb.YMin and hb.XMax>=fb.XMax and hb.YMax>=fb.YMax]
         lv=0
-        for owner,hf in holes:
-            if owner==n: continue
-            hb=hf.BoundBox; fb=face.BoundBox
-            if hb.XMin<=fb.XMin and hb.YMin<=fb.YMin and hb.XMax>=fb.XMax and hb.YMax>=fb.YMax and \
-               hf.isInside(App.Vector(probe.x,probe.y,hf.CenterOfMass.z),0.01,True):
-                lv+=1
+        if cand:
+            c=face.OuterWire.BoundBox.Center; pt=App.Vector(c.x,c.y,fb.Center.z)
+            probe=face.Vertexes[0].Point if not face.isInside(pt,0.01,True) else pt
+            for owner,hf,z in cand:
+                if hf.isInside(App.Vector(probe.x,probe.y,z),0.01,True): lv+=1
         level[n]=lv
     return level
 
@@ -828,9 +828,12 @@ def mecanizar(doc,groups,kerf,tool_label,post,adapt_qt,opt,outdir,base,save_reta
             if progress and progress.wasCanceled(): return results
             drop_prepared(doc,pre)   # classic in-process profiles
             pre={}
+    # Phase 2: put each program in its CAM job (no view refresh per sheet: fitting
+    # the 3D view of a full sheet cost ~4 s every time).
+    work=[]
     for i,(name,sb,parts) in enumerate(groups,1):
         tag=("_chapa%d"%i) if total>1 else ""
-        if step("%s: %d piezas..."%(name,len(parts)),int(35+65*(i-1)/total)): return results
+        if step("%s: %d piezas..."%(name,len(parts)),int(35+10*(i-1)/total)): return results
         raw=os.path.join(outdir,"%s%s_%s.ngc"%(base,tag,post))
         parallel=pooled and i in pre
         if parallel:
@@ -838,40 +841,56 @@ def mecanizar(doc,groups,kerf,tool_label,post,adapt_qt,opt,outdir,base,save_reta
             show_program_in_job(doc,i,name,job,tc,raw)
         else:
             job,tc,ops,model,ntop,th,_=make_job(doc,i,name,sb,parts,kerf,tool_label,post)
-        Gui.ActiveDocument.ActiveView.viewTop(); Gui.SendMsgToActiveView("ViewFit"); QtWidgets.QApplication.processEvents()
-        if step("%s: perfil calculado (%d caras). Postprocesando con %s..."%(name,ntop,post)): return results
-        if not parallel:
+            if step("%s: perfil calculado (%d caras). Postprocesando con %s..."%(name,ntop,post)): return results
             run_post(post,[tc]+ops,raw)
         # The profiles are computed; adding drawings later must not make
         # FreeCAD recompute them again (that doubled the time).
-        for o in [job]+list(job.OutListRecursive): 
+        for o in [job]+list(job.OutListRecursive):
             try: o.purgeTouched()
             except Exception: pass
         res=dict(name=name,raw=raw,parts=len(parts),final=raw)
         res["expected_holes"]=sum(len([f for f in p.Shape.Faces if f.normalAt(0,0).z>0.99][0].Wires)-1 for p in parts)
+        w=dict(i=i,name=name,sb=sb,parts=parts,job=job,th=th,res=res,tag=tag,
+               dst=os.path.join(outdir,"%s%s_QtPlasmaC.ngc"%(base,tag)),
+               title="%s %.0f x %.0f mm"%(name,sb.XLength,sb.YLength))
         if adapt_qt:
-            faces=[f for f in model.Shape.Faces if f.normalAt(0,0).z<-0.99]
-            dst=os.path.join(outdir,"%s%s_QtPlasmaC.ngc"%(base,tag))
-            def tick(n,N):
-                if progress:
-                    progress.setLabelText("%s: entradas/salidas y adaptacion a QtPlasmaC (%d/%d)..."%(name,n,N))
-                    progress.setValue(int(35+65*(i-1)/total + 65/total*n/max(N,1)))
-                    QtWidgets.QApplication.processEvents(); return progress.wasCanceled()
-                return False
-            r=adapt(raw,dst,faces,sb,opt,"%s %.0f x %.0f mm"%(name,sb.XLength,sb.YLength),tick)
-            if r is None: return results
-            g=doc.addObject("Part::Feature","Plasma_GCode_%d"%i); g.Label="G-code %s (cortes)"%name; g.Shape=Part.makeCompound(r["wires"])
+            w["faces"]=[f for f in model.Shape.Faces if f.normalAt(0,0).z<-0.99]
+        work.append(w)
+    # Phase 3: lead-ins/outs and QtPlasmaC, every sheet at the same time in
+    # background FreeCAD processes (one sheet each); in this FreeCAD as fallback.
+    adapted={}
+    if adapt_qt and len(work)>=2 and worker_exe():
+        def atick(done,n,secs):
+            return step("Entradas/salidas y adaptacion a QtPlasmaC de %d chapa(s) en %d nucleos (%d de %d, %.0f s)..."%(
+                len(work),n,done,n,secs),int(45+45*done/max(n,1)))
+        adapted=parallel_adapt(work,opt,atick) or {}
+        if progress and progress.wasCanceled(): return results
+    for w in work:
+        i,name,sb,parts,job,th,res=w["i"],w["name"],w["sb"],w["parts"],w["job"],w["th"],w["res"]
+        if adapt_qt:
+            r=adapted.get(i)
+            if r is None:
+                def tick(n,N):
+                    if progress:
+                        progress.setLabelText("%s: entradas/salidas y adaptacion a QtPlasmaC (%d/%d)..."%(name,n,N))
+                        progress.setValue(int(45+45*(i-1)/total + 45/total*n/max(N,1)))
+                        QtWidgets.QApplication.processEvents(); return progress.wasCanceled()
+                    return False
+                r=adapt(res["raw"],w["dst"],w["faces"],sb,opt,w["title"],tick)
+                if r is None: return results
+                r["shape"]=Part.makeCompound(r["wires"])
+            step("%s: creando el G-code y las perforaciones..."%name,int(90+10*(i-1)/total))
+            g=doc.addObject("Part::Feature","Plasma_GCode_%d"%i); g.Label="G-code %s (cortes)"%name; g.Shape=r["shape"]
             g.ViewObject.LineColor=(0.0,0.6,0.0); g.ViewObject.LineWidth=2
             pp=doc.addObject("Part::Feature","Plasma_Perforaciones_%d"%i); pp.Label="Perforaciones %s"%name
             pp.Shape=Part.makeCompound([Part.Vertex(App.Vector(x,y,0)) for x,y in r["piers"]]); pp.ViewObject.PointColor=(1.0,0.0,0.0); pp.ViewObject.PointSize=6
             txt=r["text"]
             # Data for the PDF report (drawn in the background at the end).
             res["_report"]=dict(doc=doc,index=i,name=name,sb=sb,parts=parts,piers=r["piers"],
-                                cut_length=sum(w.Length for w in r["wires"]),offcut=find_offcut(doc,sb))
-            res.update(final=dst,holes=r["holes"],outer=r["outer"],worst=r["worst"],short=r["short"],
+                                cut_length=r["shape"].Length,offcut=find_offcut(doc,sb))
+            res.update(final=w["dst"],holes=r["holes"],outer=r["outer"],worst=r["worst"],short=r["short"],
                        m3=txt.count("M3 $0 S1"),m5=txt.count("M5 $0"),z=len(re.findall(r"\bZ-?\d",txt)))
-            for o in (g,pp): o.recompute()
-            QtWidgets.QApplication.processEvents()
+            for o in (g,pp): o.purgeTouched()
             if make_simulation:
                 # The plasma simulation window plays the G-code object above; the
                 # extra CAM "simulation" job (~3.5 s per sheet) is no longer made.
@@ -887,7 +906,82 @@ def mecanizar(doc,groups,kerf,tool_label,post,adapt_qt,opt,outdir,base,save_reta
             job.PlasmaFiles=sorted(set(files))
         except Exception: pass
         results.append(res)
+    try:
+        v=Gui.getDocument(doc.Name).activeView(); v.viewTop(); v.fitAll()
+    except Exception: pass
     return results
+
+ADAPT_SCRIPT=r'''
+import sys, json, traceback
+sys.path.insert(0, %(moddir)r)
+import FreeCAD as App, Part
+cfg=json.load(open(%(cfg)r, encoding="utf-8"))
+try:
+    import BotonesPlasma_Mecanizar as M
+    for j in cfg["jobs"]:
+        fs=Part.Shape(); fs.importBrep(j["faces"])
+        b=j["sheet"]; sb=App.BoundBox(b[0],b[1],b[2],b[3],b[4],b[5])
+        r=M.adapt(j["raw"],j["dst"],fs.Faces,sb,cfg["opt"],j["title"],lambda n,N: False)
+        Part.makeCompound(r["wires"]).exportBrep(j["wires"])
+        json.dump(dict(holes=r["holes"],outer=r["outer"],worst=r["worst"],short=r["short"],
+                       piers=[list(p) for p in r["piers"]]),open(j["out"],"w"))
+    open(cfg["done"],"w").write("ok")
+except Exception:
+    open(cfg["done"]+".err","w").write(traceback.format_exc())
+'''
+
+def parallel_adapt(work,opt,tick=None,workers=WORKERS):
+    """Lead-ins/outs + QtPlasmaC of every sheet in background FreeCAD processes
+    (each takes whole sheets). Returns {sheet index: result} or None."""
+    import subprocess, tempfile, shutil
+    exe=worker_exe()
+    if not exe: return None
+    tmp=tempfile.mkdtemp(prefix="plasma_adapt_")
+    procs=[]
+    try:
+        jobs=[]
+        for w in work:
+            fb=os.path.join(tmp,"caras_%d.brep"%w["i"]); Part.makeCompound(w["faces"]).exportBrep(fb)
+            b=w["sb"]
+            jobs.append(dict(i=w["i"],raw=w["res"]["raw"],dst=w["dst"],faces=fb,title=w["title"],
+                             sheet=[b.XMin,b.YMin,b.ZMin,b.XMax,b.YMax,b.ZMax],
+                             wires=os.path.join(tmp,"cortes_%d.brep"%w["i"]),out=os.path.join(tmp,"datos_%d.json"%w["i"]),
+                             size=len(w["faces"])))
+        n=min(workers,len(jobs)); bins=[[] for _ in range(n)]; load=[0]*n
+        for j in sorted(jobs,key=lambda j:-j["size"]):
+            k=load.index(min(load)); bins[k].append(j); load[k]+=j["size"]+20
+        moddir=os.path.dirname(os.path.abspath(__file__))
+        for k,b in enumerate(bins):
+            cfg=os.path.join(tmp,"cfg_%d.json"%k); done=os.path.join(tmp,"hecho_%d"%k)
+            json.dump(dict(jobs=b,opt=opt,done=done),open(cfg,"w",encoding="utf-8"))
+            script=os.path.join(tmp,"adaptar_%d.py"%k)
+            open(script,"w",encoding="utf-8").write(ADAPT_SCRIPT%dict(moddir=moddir,cfg=cfg))
+            procs.append((subprocess.Popen([exe,script],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+                          creationflags=0x08000000 if os.name=="nt" else 0),done))
+        t0=time.time()
+        while True:
+            finished=sum(1 for pr,d in procs if pr.poll() is not None)
+            if tick and tick(finished,len(procs),time.time()-t0): return None
+            if finished==len(procs): break
+            QtWidgets.QApplication.processEvents(); time.sleep(0.2)
+        if not all(os.path.exists(d) for pr,d in procs):
+            errs=[open(d+".err").read()[-300:] for pr,d in procs if os.path.exists(d+".err")]
+            log("Adaptacion en paralelo fallida, se hace en este FreeCAD: %s"%(errs[0] if errs else "sin resultado"))
+            return None
+        out={}
+        for j in jobs:
+            r=json.load(open(j["out"])); sh=Part.Shape(); sh.importBrep(j["wires"])
+            r["shape"]=sh; r["piers"]=[tuple(p) for p in r["piers"]]
+            r["text"]=open(j["dst"]).read()
+            out[j["i"]]=r
+        log("Entradas/salidas de %d chapa(s) calculadas en %d procesos en %.0f s"%(len(jobs),len(procs),time.time()-t0))
+        return out
+    finally:
+        for pr,d in procs:
+            if pr.poll() is None:
+                try: pr.kill()
+                except Exception: pass
+        shutil.rmtree(tmp,ignore_errors=True)
 
 def start_reports(res,settings):
     """Save the report data of every program and draw the PDFs in a background
